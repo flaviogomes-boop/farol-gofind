@@ -2,16 +2,17 @@ import streamlit as st
 import pandas as pd
 import boto3
 import io
+import calendar
 from datetime import datetime, date
 
 st.set_page_config(
-    page_title="Farol Completo Gofind - Sellout & Estoque",
+    page_title="Farol Calendário Gofind - Vetoquinol",
     page_icon="🚦",
     layout="wide"
 )
 
-st.title("🚦 Farol Diário de Saúde de Dados (Sellout + Estoque)")
-st.caption("Cruzamento por CNPJ do Distribuidor de 01/01/2025 até hoje. Auditoria de integridade e faltas.")
+st.title("🚦 Farol Calendário de Saúde de Dados (Gofind)")
+st.caption("Visão em formato de calendário mensal interativo para acompanhamento diário por distribuidor.")
 
 # --- CREDENCIAIS AWS S3 ---
 AWS_KEY = str(st.secrets.get("AWS_ACCESS_KEY_ID", "AKIARSGQ7ED4FB3WIUF5")).strip()
@@ -31,7 +32,6 @@ def carregar_e_compilar_tudo(key, secret, bucket, prefix):
     # 1. SELLOUT
     res_so = s3.list_objects_v2(Bucket=bucket, Prefix=f"{prefix}reports/")
     arq_so = [obj['Key'] for obj in res_so.get('Contents', []) if obj['Key'].endswith('.csv')]
-    
     dfs_so = []
     for k in arq_so:
         try:
@@ -41,13 +41,11 @@ def carregar_e_compilar_tudo(key, secret, bucket, prefix):
             dfs_so.append(df_t)
         except Exception:
             pass
-            
     df_sellout = pd.concat(dfs_so, ignore_index=True) if dfs_so else pd.DataFrame()
 
     # 2. ESTOQUE
     res_st = s3.list_objects_v2(Bucket=bucket, Prefix=f"{prefix}stock-reports/")
     arq_st = [obj['Key'] for obj in res_st.get('Contents', []) if obj['Key'].endswith('.csv')]
-    
     dfs_st = []
     for k in arq_st:
         try:
@@ -57,7 +55,6 @@ def carregar_e_compilar_tudo(key, secret, bucket, prefix):
             dfs_st.append(df_t)
         except Exception:
             pass
-            
     df_stock = pd.concat(dfs_st, ignore_index=True) if dfs_st else pd.DataFrame()
 
     # Tratamento Sellout
@@ -76,135 +73,179 @@ def carregar_e_compilar_tudo(key, secret, bucket, prefix):
 
     return df_sellout, df_stock
 
-with st.spinner("Compilando base completa do S3..."):
+with st.spinner("Compilando base de dados do S3..."):
     df_sellout, df_stock = carregar_e_compilar_tudo(AWS_KEY, AWS_SECRET, BUCKET, PREFIX)
 
-# --- TRATAMENTO SEGURO DA LISTA DE CNPJS (CORREÇÃO DO BUG) ---
+# Mapeamento Mestre de CNPJs e Nomes
 cnpjs_so = [str(x) for x in df_sellout['distribuidor_clean'].dropna().unique() if str(x).strip() != ''] if not df_sellout.empty else []
 cnpjs_st = [str(x) for x in df_stock['cnpj_clean'].dropna().unique() if str(x).strip() != ''] if not df_stock.empty else []
 cnpjs_todos = sorted(list(set(cnpjs_so + cnpjs_st)))
 
-# Mapeamento de Nomes
 mapa_nomes = {}
 if not df_sellout.empty:
     mapa_nomes.update(df_sellout.set_index('distribuidor_clean')['nome_distribuidor'].dropna().to_dict())
 if not df_stock.empty:
     mapa_nomes.update(df_stock.set_index('cnpj_clean')['nome_loja'].dropna().to_dict())
 
-# --- NAVEGAÇÃO ---
+# Navegação das Abas
 aba1, aba2, aba3, aba4 = st.tabs([
-    "🚦 Farol Diário de Sellout", 
-    "📦 Farol Diário de Estoque", 
+    "📅 Calendário Farol - Sellout", 
+    "📦 Calendário Farol - Estoque", 
     "🚨 Auditoria Sellout (Duplicidades)", 
     "📊 Tabela Completa de Estoque"
 ])
 
 # ----------------------------------------------------
-# ABA 1: FAROL DIÁRIO DE SELLOUT
+# COMPONENTE DE CONTROLE DE DATA / MÊS RECORRENTE
+# ----------------------------------------------------
+def render_controles_data(key_prefix):
+    col_tipo, col_m, col_a, col_custom = st.columns([2, 2, 2, 4])
+    tipo_busca = col_tipo.radio("Modo de Visão:", ["Mês Recorrente", "Período Personalizado"], key=f"{key_prefix}_tipo", horizontal=True)
+    
+    today = date.today()
+    if tipo_busca == "Mês Recorrente":
+        mes = col_m.selectbox("Mês:", list(range(1, 13)), index=today.month - 1, key=f"{key_prefix}_m")
+        ano = col_a.selectbox("Ano:", list(range(2025, today.year + 2)), index=list(range(2025, today.year + 2)).index(today.year), key=f"{key_prefix}_a")
+        dt_inicio = date(ano, mes, 1)
+        _, ult_dia = calendar.monthrange(ano, mes)
+        dt_fim = date(ano, mes, ult_dia)
+    else:
+        datas = col_custom.date_input("Selecione o Período:", [date(2025, 1, 1), today], key=f"{key_prefix}_custom")
+        dt_inicio = datas[0] if len(datas) > 0 else date(2025, 1, 1)
+        dt_fim = datas[1] if len(datas) > 1 else today
+        
+    return pd.date_range(dt_inicio, dt_fim).strftime('%Y-%m-%d').tolist(), dt_inicio, dt_fim
+
+# ----------------------------------------------------
+# ABA 1: CALENDÁRIO MENSAL - SELLOUT
 # ----------------------------------------------------
 with aba1:
-    st.subheader("Esteira Diária de Sellout por CNPJ")
+    st.subheader("Calendário de Acompanhamento Diário - Sellout")
+    datas_periodo_so, dt_ini_so, dt_fim_so = render_controles_data("so")
     
-    cnpj_sel_so = st.selectbox(
-        "Selecione o Distribuidor (CNPJ):", 
-        options=cnpjs_todos, 
-        format_func=lambda x: f"{x} - {mapa_nomes.get(x, 'Distribuidor ' + x)}"
+    # Cruzamento de todos os CNPJs x Datas do Período
+    base_grade_so = []
+    for d in datas_periodo_so:
+        for c in cnpjs_todos:
+            base_grade_so.append({'dt_venda': d, 'distribuidor_clean': c})
+    df_grid_so = pd.DataFrame(base_grade_so)
+    
+    if not df_sellout.empty:
+        agg_so = df_sellout.groupby(['dt_venda', 'distribuidor_clean']).agg(
+            Qtd_Notas=('nNF', 'nunique'),
+            Itens_Vendidos=('quantidade_produtos', 'sum'),
+            Faturamento=('preco_venda_total', 'sum')
+        ).reset_index()
+        df_cross_so = pd.merge(df_grid_so, agg_so, on=['dt_venda', 'distribuidor_clean'], how='left').fillna(0)
+    else:
+        df_cross_so = df_grid_so
+        df_cross_so['Qtd_Notas'] = 0
+        df_cross_so['Itens_Vendidos'] = 0
+        df_cross_so['Faturamento'] = 0.0
+
+    def def_status_so(r):
+        if r['Qtd_Notas'] > 0 and r['Itens_Vendidos'] > 0:
+            return "🟢 Verde (OK)"
+        elif r['Qtd_Notas'] > 0:
+            return "🟡 Amarelo (Atenção)"
+        else:
+            return "🔴 Vermelho (Não Enviou)"
+
+    df_cross_so['Status'] = df_cross_so.apply(def_status_so, axis=1)
+    df_cross_so['Nome_Distribuidor'] = df_cross_so['distribuidor_clean'].map(lambda x: mapa_nomes.get(x, f"CNPJ {x}"))
+
+    # Resumo Diário Consolidado
+    res_diario_so = df_cross_so.groupby('dt_venda').agg(
+        Verdes=('Status', lambda x: (x == "🟢 Verde (OK)").sum()),
+        Amarelos=('Status', lambda x: (x == "🟡 Amarelo (Atenção)").sum()),
+        Vermelhos=('Status', lambda x: (x == "🔴 Vermelho (Não Enviou)").sum()),
+        Faturamento_Dia=('Faturamento', 'sum')
+    ).reset_index()
+
+    st.markdown("##### Resumo do Mês / Período Selecionado")
+    st.dataframe(
+        res_diario_so.assign(Faturamento_Dia=res_diario_so['Faturamento_Dia'].apply(formatar_real)),
+        use_container_width=True
     )
     
-    if cnpj_sel_so:
-        datas_cal = pd.date_range(start="2025-01-01", end=date.today().strftime('%Y-%m-%d')).strftime('%Y-%m-%d').tolist()
-        df_cal_so = pd.DataFrame({'dt_venda': datas_cal})
-        df_cal_so['distribuidor_clean'] = cnpj_sel_so
-        
-        df_so_cnpj = df_sellout[df_sellout['distribuidor_clean'] == cnpj_sel_so] if not df_sellout.empty else pd.DataFrame()
-        
-        if not df_so_cnpj.empty:
-            agg_so = df_so_cnpj.groupby('dt_venda').agg(
-                Qtd_Notas=('nNF', 'nunique'),
-                Itens_Vendidos=('quantidade_produtos', 'sum'),
-                Faturamento=('preco_venda_total', 'sum')
-            ).reset_index()
-            df_farol_so = pd.merge(df_cal_so, agg_so, on='dt_venda', how='left').fillna(0)
-        else:
-            df_farol_so = df_cal_so
-            df_farol_so['Qtd_Notas'] = 0
-            df_farol_so['Itens_Vendidos'] = 0
-            df_farol_so['Faturamento'] = 0.0
+    st.divider()
+    st.markdown("##### 🔍 Detalhamento por Dia e Sinal do Farol")
+    
+    col_d_sel, col_s_sel = st.columns(2)
+    dia_escolhido_so = col_d_sel.selectbox("Escolha o Dia para Inspecionar:", options=datas_periodo_so, key="dia_so")
+    status_escolhido_so = col_s_sel.radio("Filtrar por Sinal:", ["🔴 Vermelho (Não Enviou)", "🟢 Verde (OK)", "🟡 Amarelo (Atenção)"], key="stat_so", horizontal=True)
 
-        def status_so(row):
-            if row['Qtd_Notas'] > 0 and row['Itens_Vendidos'] > 0:
-                return "🟢 Recebido c/ Vendas"
-            elif row['Qtd_Notas'] > 0:
-                return "🟡 Apenas Nota (s/ Volume)"
-            else:
-                return "🔴 Não Enviou Nota"
-
-        df_farol_so['Farol_Sellout'] = df_farol_so.apply(status_so, axis=1)
-        df_farol_so['Nome_Distribuidor'] = mapa_nomes.get(cnpj_sel_so, cnpj_sel_so)
-        
-        d1, d2, d3, d4 = st.columns(4)
-        d1.metric("Dias sem Envio de Nota (🔴)", len(df_farol_so[df_farol_so['Farol_Sellout'].str.contains("🔴")]))
-        d2.metric("Dias com Vendas (🟢)", len(df_farol_so[df_farol_so['Farol_Sellout'].str.contains("🟢")]))
-        d3.metric("Total Notas no Período", int(df_farol_so['Qtd_Notas'].sum()))
-        d4.metric("Faturamento Acumulado", formatar_real(df_farol_so['Faturamento'].sum()))
-
-        st.divider()
-        exib_so = df_farol_so.copy()
-        exib_so['Faturamento'] = exib_so['Faturamento'].apply(formatar_real)
-        st.dataframe(exib_so[['dt_venda', 'distribuidor_clean', 'Nome_Distribuidor', 'Farol_Sellout', 'Qtd_Notas', 'Itens_Vendidos', 'Faturamento']].sort_values(by='dt_venda', ascending=False), use_container_width=True)
+    detalhe_so = df_cross_so[(df_cross_so['dt_venda'] == dia_escolhido_so) & (df_cross_so['Status'] == status_escolhido_so)]
+    
+    st.write(f"**Listagem de Distribuidores ({len(detalhe_so)}) no dia `{dia_escolhido_so}` com status `{status_escolhido_so}`:**")
+    
+    exib_detalhe_so = detalhe_so.copy()
+    exib_detalhe_so['Faturamento'] = exib_detalhe_so['Faturamento'].apply(formatar_real)
+    st.dataframe(
+        exib_detalhe_so[['distribuidor_clean', 'Nome_Distribuidor', 'Qtd_Notas', 'Itens_Vendidos', 'Faturamento']],
+        use_container_width=True
+    )
 
 # ----------------------------------------------------
-# ABA 2: FAROL DIÁRIO DE ESTOQUE
+# ABA 2: CALENDÁRIO MENSAL - ESTOQUE
 # ----------------------------------------------------
 with aba2:
-    st.subheader("Esteira Diária de Envio de Estoque (Stock Reports)")
+    st.subheader("Calendário de Acompanhamento Diário - Estoque (Stock)")
+    datas_periodo_st, dt_ini_st, dt_fim_st = render_controles_data("st")
     
-    cnpj_sel_st = st.selectbox(
-        "Selecione o Distribuidor para Estoque:", 
-        options=cnpjs_todos, 
-        key="st_sel", 
-        format_func=lambda x: f"{x} - {mapa_nomes.get(x, 'Distribuidor ' + x)}"
-    )
+    base_grade_st = []
+    for d in datas_periodo_st:
+        for c in cnpjs_todos:
+            base_grade_st.append({'dt_estoque': d, 'cnpj_clean': c})
+    df_grid_st = pd.DataFrame(base_grade_st)
     
-    if cnpj_sel_st:
-        datas_cal = pd.date_range(start="2025-01-01", end=date.today().strftime('%Y-%m-%d')).strftime('%Y-%m-%d').tolist()
-        df_cal_st = pd.DataFrame({'dt_estoque': datas_cal})
-        df_cal_st['cnpj_clean'] = cnpj_sel_st
-        
-        df_st_cnpj = df_stock[df_stock['cnpj_clean'] == cnpj_sel_st] if not df_stock.empty else pd.DataFrame()
-        
-        if not df_st_cnpj.empty:
-            agg_st = df_st_cnpj.groupby('dt_estoque').agg(
-                Registros_Estoque=('quantidade', 'count'),
-                Saldo_Total_Itens=('quantidade', 'sum'),
-                Produtos_Distintos=('ean', 'nunique')
-            ).reset_index()
-            df_farol_st = pd.merge(df_cal_st, agg_st, on='dt_estoque', how='left').fillna(0)
+    if not df_stock.empty:
+        agg_st = df_stock.groupby(['dt_estoque', 'cnpj_clean']).agg(
+            Registros=('quantidade', 'count'),
+            Saldo_Itens=('quantidade', 'sum'),
+            Produtos_Distintos=('ean', 'nunique')
+        ).reset_index()
+        df_cross_st = pd.merge(df_grid_st, agg_st, on=['dt_estoque', 'cnpj_clean'], how='left').fillna(0)
+    else:
+        df_cross_st = df_grid_st
+        df_cross_st['Registros'] = 0
+        df_cross_st['Saldo_Itens'] = 0
+        df_cross_st['Produtos_Distintos'] = 0
+
+    def def_status_st(r):
+        if r['Registros'] > 0:
+            return "🟢 Verde (Estoque Recebido)"
         else:
-            df_farol_st = df_cal_st
-            df_farol_st['Registros_Estoque'] = 0
-            df_farol_st['Saldo_Total_Itens'] = 0
-            df_farol_st['Produtos_Distintos'] = 0
+            return "🔴 Vermelho (Estoque Ausente)"
 
-        def status_st(row):
-            if row['Registros_Estoque'] > 0:
-                return "🟢 Estoque Recebido"
-            else:
-                return "🔴 Estoque Ausente"
+    df_cross_st['Status'] = df_cross_st.apply(def_status_st, axis=1)
+    df_cross_st['Nome_Distribuidor'] = df_cross_st['cnpj_clean'].map(lambda x: mapa_nomes.get(x, f"CNPJ {x}"))
 
-        df_farol_st['Farol_Estoque'] = df_farol_st.apply(status_st, axis=1)
-        df_farol_st['Nome_Distribuidor'] = mapa_nomes.get(cnpj_sel_st, cnpj_sel_st)
-        
-        s1, s2, s3 = st.columns(3)
-        s1.metric("Dias c/ Estoque Recebido (🟢)", len(df_farol_st[df_farol_st['Farol_Estoque'].str.contains("🟢")]))
-        s2.metric("Dias SEM Envio de Estoque (🔴)", len(df_farol_st[df_farol_st['Farol_Estoque'].str.contains("🔴")]))
-        s3.metric("Média de Produtos Diferentes por Envio", round(df_farol_st[df_farol_st['Registros_Estoque'] > 0]['Produtos_Distintos'].mean() or 0, 1))
+    res_diario_st = df_cross_st.groupby('dt_estoque').agg(
+        Verdes=('Status', lambda x: (x == "🟢 Verde (Estoque Recebido)").sum()),
+        Vermelhos=('Status', lambda x: (x == "🔴 Vermelho (Estoque Ausente)").sum())
+    ).reset_index()
 
-        st.divider()
-        st.dataframe(df_farol_st[['dt_estoque', 'cnpj_clean', 'Nome_Distribuidor', 'Farol_Estoque', 'Registros_Estoque', 'Produtos_Distintos', 'Saldo_Total_Itens']].sort_values(by='dt_estoque', ascending=False), use_container_width=True)
+    st.markdown("##### Resumo de Envios de Estoque do Mês / Período")
+    st.dataframe(res_diario_st, use_container_width=True)
+    
+    st.divider()
+    st.markdown("##### 🔍 Detalhamento por Dia de Estoque")
+    
+    col_d_st, col_s_st = st.columns(2)
+    dia_escolhido_st = col_d_st.selectbox("Escolha o Dia de Estoque:", options=datas_periodo_st, key="dia_st")
+    status_escolhido_st = col_s_st.radio("Filtrar por Sinal:", ["🔴 Vermelho (Estoque Ausente)", "🟢 Verde (Estoque Recebido)"], key="stat_st", horizontal=True)
+
+    detalhe_st = df_cross_st[(df_cross_st['dt_estoque'] == dia_escolhido_st) & (df_cross_st['Status'] == status_escolhido_st)]
+    
+    st.write(f"**Listagem de Distribuidores ({len(detalhe_st)}) no dia `{dia_escolhido_st}` com status `{status_escolhido_st}`:**")
+    st.dataframe(
+        detalhe_st[['cnpj_clean', 'Nome_Distribuidor', 'Registros', 'Produtos_Distintos', 'Saldo_Itens']],
+        use_container_width=True
+    )
 
 # ----------------------------------------------------
-# ABA 3: AUDITORIA SELLOUT
+# ABA 3: AUDITORIA SELLOUT (DUPLICIDADES)
 # ----------------------------------------------------
 with aba3:
     st.subheader("Auditoria de Notas e Linhas Duplicadas em Sellout")
@@ -217,22 +258,16 @@ with aba3:
         st.dataframe(dup_so, use_container_width=True)
 
 # ----------------------------------------------------
-# ABA 4: TABELA COMPLETA DE ESTOQUE + DUPLICADOS
+# ABA 4: TABELA COMPLETA DE ESTOQUE
 # ----------------------------------------------------
 with aba4:
     st.subheader("Base de Dados Completa de Estoque Diário")
     if not df_stock.empty:
         cols_chave_st = ['cnpj_clean', 'ean', 'quantidade', 'dt_estoque']
-        
         df_stock_analise = df_stock.copy()
         df_stock_analise['Duplicado_no_Dia'] = df_stock_analise.duplicated(subset=cols_chave_st, keep=False)
         df_stock_analise['Status_Linha'] = df_stock_analise['Duplicado_no_Dia'].apply(lambda x: "⚠️ Repetido no Dia" if x else "✅ Ok")
         
-        a1, a2 = st.columns(2)
-        a1.metric("Total de Linhas na Base de Estoque", len(df_stock_analise))
-        a2.metric("Linhas Repetidas no Mesmo Dia", len(df_stock_analise[df_stock_analise['Duplicado_no_Dia']]), delta_color="inverse")
-        
-        st.divider()
         st.dataframe(
             df_stock_analise[['arquivo_origem', 'data', 'cnpj_clean', 'nome_loja', 'ean', 'nome_produto', 'quantidade', 'Status_Linha']].sort_values(by=['data', 'cnpj_clean'], ascending=[False, True]),
             use_container_width=True

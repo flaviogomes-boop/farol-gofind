@@ -5,16 +5,117 @@ import io
 import calendar
 from datetime import datetime, date
 
+# Configuração da Página
 st.set_page_config(
-    page_title="Farol Calendário Gofind - Vetoquinol",
+    page_title="Gofind - Farol de Saúde de Dados",
     page_icon="🚦",
-    layout="wide"
+    layout="wide",
+    initial_sidebar_state="expanded"
 )
 
-st.title("🚦 Farol Calendário de Saúde de Dados (Gofind)")
-st.caption("Visão em formato de calendário mensal interativo para acompanhamento diário por distribuidor.")
+# --- ESTILIZAÇÃO CSS (MANUAL DE MARCA GOFIND + PORTAL GOFIND) ---
+st.markdown("""
+<style>
+    @import url('https://fonts.googleapis.com/css2?family=Kumbh+Sans:wght@400;600;700&family=Raleway:wght@400;500;600&display=swap');
 
-# --- CREDENCIAIS AWS S3 ---
+    html, body, [class*="css"] {
+        font-family: 'Raleway', sans-serif;
+        color: #444444;
+    }
+    
+    /* Fundo da Área Principal */
+    .stApp {
+        background-color: #F8F9FA;
+    }
+
+    /* Sidebar Estilo Portal Gofind (#0E3940) */
+    [data-testid="stSidebar"] {
+        background-color: #0E3940 !important;
+        color: #FFFFFF !important;
+    }
+    [data-testid="stSidebar"] * {
+        color: #FFFFFF !important;
+    }
+    
+    /* Títulos Kumbh Sans */
+    h1, h2, h3, h4, .stMarkdown h1, .stMarkdown h2, .stMarkdown h3 {
+        font-family: 'Kumbh Sans', sans-serif !important;
+        color: #0E3940 !important;
+        font-weight: 700;
+    }
+
+    /* Estilo do Logo Header */
+    .gofind-header {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        padding: 10px 0px 20px 0px;
+        border-bottom: 1px solid rgba(255,255,255,0.1);
+        margin-bottom: 20px;
+    }
+    .gofind-logo-text {
+        font-family: 'Kumbh Sans', sans-serif;
+        font-size: 26px;
+        font-weight: 700;
+        color: #93C400 !important;
+        letter-spacing: -0.5px;
+    }
+    .gofind-logo-dot {
+        color: #93C400;
+    }
+
+    /* Abas Customizadas */
+    .stTabs [data-baseweb="tab-list"] {
+        gap: 8px;
+        background-color: transparent;
+    }
+    .stTabs [data-baseweb="tab"] {
+        height: 45px;
+        background-color: #FFFFFF;
+        border-radius: 6px;
+        color: #0E3940;
+        font-weight: 600;
+        font-family: 'Kumbh Sans', sans-serif;
+        border: 1px solid #E2E8F0;
+    }
+    .stTabs [aria-selected="true"] {
+        background-color: #93C400 !important;
+        color: #FFFFFF !important;
+        border-color: #93C400 !important;
+    }
+
+    /* Cards e Métricas */
+    [data-testid="stMetric"] {
+        background-color: #FFFFFF;
+        padding: 15px;
+        border-radius: 8px;
+        border-left: 5px solid #93C400;
+        box-shadow: 0 1px 3px rgba(0,0,0,0.05);
+    }
+    [data-testid="stMetricLabel"] {
+        font-family: 'Kumbh Sans', sans-serif;
+        color: #0E3940 !important;
+        font-weight: 600;
+    }
+</style>
+""", unsafe_allow_html=True)
+
+# --- SIDEBAR FIXA (ESTILO PORTAL) ---
+with st.sidebar:
+    st.markdown("""
+        <div class="gofind-header">
+            <svg width="36" height="24" viewBox="0 0 120 80" fill="none" xmlns="http://www.w3.org/2000/svg">
+                <path d="M30 40C30 23.4315 43.4315 10 60 10C76.5685 10 90 23.4315 90 40C90 56.5685 76.5685 70 60 70C43.4315 70 30 56.5685 30 40Z" fill="#93C400"/>
+                <circle cx="35" cy="40" r="12" fill="#0E3940"/>
+            </svg>
+            <span class="gofind-logo-text">go<span style="color:#93C400;">find</span></span>
+        </div>
+    """, unsafe_allow_html=True)
+    st.write("👤 **Olá, vetoquinol@gofind.online**")
+    st.write("🏢 **Cliente:** Vetoquinol")
+    st.divider()
+
+# Credenciais S3
 AWS_KEY = str(st.secrets.get("AWS_ACCESS_KEY_ID", "AKIARSGQ7ED4FB3WIUF5")).strip()
 AWS_SECRET = str(st.secrets.get("AWS_SECRET_ACCESS_KEY", "I/6iuAaECI9ukPUjQRU2AHIXHdvo2qOpEUaSR3S")).strip()
 BUCKET = "gofind-integration-file"
@@ -73,10 +174,9 @@ def carregar_e_compilar_tudo(key, secret, bucket, prefix):
 
     return df_sellout, df_stock
 
-with st.spinner("Compilando base de dados do S3..."):
+with st.spinner("Carregando bases do S3..."):
     df_sellout, df_stock = carregar_e_compilar_tudo(AWS_KEY, AWS_SECRET, BUCKET, PREFIX)
 
-# Mapeamento Mestre de CNPJs e Nomes
 cnpjs_so = [str(x) for x in df_sellout['distribuidor_clean'].dropna().unique() if str(x).strip() != ''] if not df_sellout.empty else []
 cnpjs_st = [str(x) for x in df_stock['cnpj_clean'].dropna().unique() if str(x).strip() != ''] if not df_stock.empty else []
 cnpjs_todos = sorted(list(set(cnpjs_so + cnpjs_st)))
@@ -87,7 +187,13 @@ if not df_sellout.empty:
 if not df_stock.empty:
     mapa_nomes.update(df_stock.set_index('cnpj_clean')['nome_loja'].dropna().to_dict())
 
-# Navegação das Abas
+# Cálculo da Média Diária Histórica por Distribuidor (para o Alerta Amarelo)
+medias_diarias_dist = {}
+if not df_sellout.empty:
+    daily_dist = df_sellout.groupby(['distribuidor_clean', 'dt_venda'])['quantidade_produtos'].sum().reset_index()
+    medias_diarias_dist = daily_dist.groupby('distribuidor_clean')['quantidade_produtos'].mean().to_dict()
+
+# Abas
 aba1, aba2, aba3, aba4 = st.tabs([
     "📅 Calendário Farol - Sellout", 
     "📦 Calendário Farol - Estoque", 
@@ -95,13 +201,9 @@ aba1, aba2, aba3, aba4 = st.tabs([
     "📊 Tabela Completa de Estoque"
 ])
 
-# ----------------------------------------------------
-# COMPONENTE DE CONTROLE DE DATA / MÊS RECORRENTE
-# ----------------------------------------------------
 def render_controles_data(key_prefix):
     col_tipo, col_m, col_a, col_custom = st.columns([2, 2, 2, 4])
     tipo_busca = col_tipo.radio("Modo de Visão:", ["Mês Recorrente", "Período Personalizado"], key=f"{key_prefix}_tipo", horizontal=True)
-    
     today = date.today()
     if tipo_busca == "Mês Recorrente":
         mes = col_m.selectbox("Mês:", list(range(1, 13)), index=today.month - 1, key=f"{key_prefix}_m")
@@ -113,21 +215,16 @@ def render_controles_data(key_prefix):
         datas = col_custom.date_input("Selecione o Período:", [date(2025, 1, 1), today], key=f"{key_prefix}_custom")
         dt_inicio = datas[0] if len(datas) > 0 else date(2025, 1, 1)
         dt_fim = datas[1] if len(datas) > 1 else today
-        
-    return pd.date_range(dt_inicio, dt_fim).strftime('%Y-%m-%d').tolist(), dt_inicio, dt_fim
+    return pd.date_range(dt_inicio, dt_fim).strftime('%Y-%m-%d').tolist()
 
 # ----------------------------------------------------
-# ABA 1: CALENDÁRIO MENSAL - SELLOUT
+# ABA 1: CALENDÁRIO SELLOUT
 # ----------------------------------------------------
 with aba1:
     st.subheader("Calendário de Acompanhamento Diário - Sellout")
-    datas_periodo_so, dt_ini_so, dt_fim_so = render_controles_data("so")
+    datas_periodo_so = render_controles_data("so")
     
-    # Cruzamento de todos os CNPJs x Datas do Período
-    base_grade_so = []
-    for d in datas_periodo_so:
-        for c in cnpjs_todos:
-            base_grade_so.append({'dt_venda': d, 'distribuidor_clean': c})
+    base_grade_so = [{'dt_venda': d, 'distribuidor_clean': c} for d in datas_periodo_so for c in cnpjs_todos]
     df_grid_so = pd.DataFrame(base_grade_so)
     
     if not df_sellout.empty:
@@ -143,60 +240,50 @@ with aba1:
         df_cross_so['Itens_Vendidos'] = 0
         df_cross_so['Faturamento'] = 0.0
 
+    # Lógica do Farol Amarelo (Média Histórica)
     def def_status_so(r):
-        if r['Qtd_Notas'] > 0 and r['Itens_Vendidos'] > 0:
-            return "🟢 Verde (OK)"
-        elif r['Qtd_Notas'] > 0:
-            return "🟡 Amarelo (Atenção)"
-        else:
+        med = medias_diarias_dist.get(r['distribuidor_clean'], 0)
+        if r['Qtd_Notas'] == 0 or r['Itens_Vendidos'] == 0:
             return "🔴 Vermelho (Não Enviou)"
+        elif r['Itens_Vendidos'] < med:
+            return "🟡 Amarelo (Abaixo da Média)"
+        else:
+            return "🟢 Verde (OK)"
 
+    df_cross_so['Media_Historica_Diaria'] = df_cross_so['distribuidor_clean'].map(lambda x: round(medias_diarias_dist.get(x, 0), 1))
     df_cross_so['Status'] = df_cross_so.apply(def_status_so, axis=1)
     df_cross_so['Nome_Distribuidor'] = df_cross_so['distribuidor_clean'].map(lambda x: mapa_nomes.get(x, f"CNPJ {x}"))
 
-    # Resumo Diário Consolidado
     res_diario_so = df_cross_so.groupby('dt_venda').agg(
         Verdes=('Status', lambda x: (x == "🟢 Verde (OK)").sum()),
-        Amarelos=('Status', lambda x: (x == "🟡 Amarelo (Atenção)").sum()),
+        Amarelos=('Status', lambda x: (x == "🟡 Amarelo (Abaixo da Média)").sum()),
         Vermelhos=('Status', lambda x: (x == "🔴 Vermelho (Não Enviou)").sum()),
         Faturamento_Dia=('Faturamento', 'sum')
     ).reset_index()
 
     st.markdown("##### Resumo do Mês / Período Selecionado")
-    st.dataframe(
-        res_diario_so.assign(Faturamento_Dia=res_diario_so['Faturamento_Dia'].apply(formatar_real)),
-        use_container_width=True
-    )
+    st.dataframe(res_diario_so.assign(Faturamento_Dia=res_diario_so['Faturamento_Dia'].apply(formatar_real)), use_container_width=True)
     
     st.divider()
-    st.markdown("##### 🔍 Detalhamento por Dia e Sinal do Farol")
-    
     col_d_sel, col_s_sel = st.columns(2)
     dia_escolhido_so = col_d_sel.selectbox("Escolha o Dia para Inspecionar:", options=datas_periodo_so, key="dia_so")
-    status_escolhido_so = col_s_sel.radio("Filtrar por Sinal:", ["🔴 Vermelho (Não Enviou)", "🟢 Verde (OK)", "🟡 Amarelo (Atenção)"], key="stat_so", horizontal=True)
+    status_escolhido_so = col_s_sel.radio("Filtrar por Sinal:", ["🔴 Vermelho (Não Enviou)", "🟡 Amarelo (Abaixo da Média)", "🟢 Verde (OK)"], key="stat_so", horizontal=True)
 
     detalhe_so = df_cross_so[(df_cross_so['dt_venda'] == dia_escolhido_so) & (df_cross_so['Status'] == status_escolhido_so)]
+    st.write(f"**Distribuidores ({len(detalhe_so)}) no dia `{dia_escolhido_so}` com status `{status_escolhido_so}`:**")
     
-    st.write(f"**Listagem de Distribuidores ({len(detalhe_so)}) no dia `{dia_escolhido_so}` com status `{status_escolhido_so}`:**")
-    
-    exib_detalhe_so = detalhe_so.copy()
-    exib_detalhe_so['Faturamento'] = exib_detalhe_so['Faturamento'].apply(formatar_real)
-    st.dataframe(
-        exib_detalhe_so[['distribuidor_clean', 'Nome_Distribuidor', 'Qtd_Notas', 'Itens_Vendidos', 'Faturamento']],
-        use_container_width=True
-    )
+    exib_so = detalhe_so.copy()
+    exib_so['Faturamento'] = exib_so['Faturamento'].apply(formatar_real)
+    st.dataframe(exib_so[['distribuidor_clean', 'Nome_Distribuidor', 'Qtd_Notas', 'Itens_Vendidos', 'Media_Historica_Diaria', 'Faturamento']], use_container_width=True)
 
 # ----------------------------------------------------
-# ABA 2: CALENDÁRIO MENSAL - ESTOQUE
+# ABA 2: CALENDÁRIO ESTOQUE
 # ----------------------------------------------------
 with aba2:
     st.subheader("Calendário de Acompanhamento Diário - Estoque (Stock)")
-    datas_periodo_st, dt_ini_st, dt_fim_st = render_controles_data("st")
+    datas_periodo_st = render_controles_data("st")
     
-    base_grade_st = []
-    for d in datas_periodo_st:
-        for c in cnpjs_todos:
-            base_grade_st.append({'dt_estoque': d, 'cnpj_clean': c})
+    base_grade_st = [{'dt_estoque': d, 'cnpj_clean': c} for d in datas_periodo_st for c in cnpjs_todos]
     df_grid_st = pd.DataFrame(base_grade_st)
     
     if not df_stock.empty:
@@ -212,13 +299,7 @@ with aba2:
         df_cross_st['Saldo_Itens'] = 0
         df_cross_st['Produtos_Distintos'] = 0
 
-    def def_status_st(r):
-        if r['Registros'] > 0:
-            return "🟢 Verde (Estoque Recebido)"
-        else:
-            return "🔴 Vermelho (Estoque Ausente)"
-
-    df_cross_st['Status'] = df_cross_st.apply(def_status_st, axis=1)
+    df_cross_st['Status'] = df_cross_st['Registros'].apply(lambda x: "🟢 Verde (Estoque Recebido)" if x > 0 else "🔴 Vermelho (Estoque Ausente)")
     df_cross_st['Nome_Distribuidor'] = df_cross_st['cnpj_clean'].map(lambda x: mapa_nomes.get(x, f"CNPJ {x}"))
 
     res_diario_st = df_cross_st.groupby('dt_estoque').agg(
@@ -226,33 +307,24 @@ with aba2:
         Vermelhos=('Status', lambda x: (x == "🔴 Vermelho (Estoque Ausente)").sum())
     ).reset_index()
 
-    st.markdown("##### Resumo de Envios de Estoque do Mês / Período")
+    st.markdown("##### Resumo de Envios de Estoque")
     st.dataframe(res_diario_st, use_container_width=True)
     
     st.divider()
-    st.markdown("##### 🔍 Detalhamento por Dia de Estoque")
-    
     col_d_st, col_s_st = st.columns(2)
     dia_escolhido_st = col_d_st.selectbox("Escolha o Dia de Estoque:", options=datas_periodo_st, key="dia_st")
     status_escolhido_st = col_s_st.radio("Filtrar por Sinal:", ["🔴 Vermelho (Estoque Ausente)", "🟢 Verde (Estoque Recebido)"], key="stat_st", horizontal=True)
 
     detalhe_st = df_cross_st[(df_cross_st['dt_estoque'] == dia_escolhido_st) & (df_cross_st['Status'] == status_escolhido_st)]
-    
-    st.write(f"**Listagem de Distribuidores ({len(detalhe_st)}) no dia `{dia_escolhido_st}` com status `{status_escolhido_st}`:**")
-    st.dataframe(
-        detalhe_st[['cnpj_clean', 'Nome_Distribuidor', 'Registros', 'Produtos_Distintos', 'Saldo_Itens']],
-        use_container_width=True
-    )
+    st.dataframe(detalhe_st[['cnpj_clean', 'Nome_Distribuidor', 'Registros', 'Produtos_Distintos', 'Saldo_Itens']], use_container_width=True)
 
 # ----------------------------------------------------
-# ABA 3: AUDITORIA SELLOUT (DUPLICIDADES)
+# ABA 3: AUDITORIA SELLOUT
 # ----------------------------------------------------
 with aba3:
     st.subheader("Auditoria de Notas e Linhas Duplicadas em Sellout")
     if not df_sellout.empty:
-        cols_chave_so = ['nfeId', 'nNF', 'distribuidor', 'loja', 'gtin', 'dt_proc']
-        cols_p = [c for c in cols_chave_so if c in df_sellout.columns]
-        
+        cols_p = [c for c in ['nfeId', 'nNF', 'distribuidor', 'loja', 'gtin', 'dt_proc'] if c in df_sellout.columns]
         dup_so = df_sellout[df_sellout.duplicated(subset=cols_p, keep=False)].sort_values(by=cols_p)
         st.metric("Total Linhas Duplicadas em Sellout", len(dup_so), delta_color="inverse")
         st.dataframe(dup_so, use_container_width=True)
@@ -263,12 +335,8 @@ with aba3:
 with aba4:
     st.subheader("Base de Dados Completa de Estoque Diário")
     if not df_stock.empty:
-        cols_chave_st = ['cnpj_clean', 'ean', 'quantidade', 'dt_estoque']
+        cols_st = ['cnpj_clean', 'ean', 'quantidade', 'dt_estoque']
         df_stock_analise = df_stock.copy()
-        df_stock_analise['Duplicado_no_Dia'] = df_stock_analise.duplicated(subset=cols_chave_st, keep=False)
+        df_stock_analise['Duplicado_no_Dia'] = df_stock_analise.duplicated(subset=cols_st, keep=False)
         df_stock_analise['Status_Linha'] = df_stock_analise['Duplicado_no_Dia'].apply(lambda x: "⚠️ Repetido no Dia" if x else "✅ Ok")
-        
-        st.dataframe(
-            df_stock_analise[['arquivo_origem', 'data', 'cnpj_clean', 'nome_loja', 'ean', 'nome_produto', 'quantidade', 'Status_Linha']].sort_values(by=['data', 'cnpj_clean'], ascending=[False, True]),
-            use_container_width=True
-        )
+        st.dataframe(df_stock_analise[['arquivo_origem', 'data', 'cnpj_clean', 'nome_loja', 'ean', 'nome_produto', 'quantidade', 'Status_Linha']].sort_values(by=['data', 'cnpj_clean'], ascending=[False, True]), use_container_width=True)

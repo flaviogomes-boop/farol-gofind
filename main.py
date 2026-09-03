@@ -3,142 +3,180 @@ import pandas as pd
 import boto3
 import io
 import plotly.express as px
-from datetime import datetime, timedelta
+from datetime import datetime
 
 st.set_page_config(
-    page_title="Farol Consolidado Gofind - Vetoquinol",
+    page_title="Farol de Auditoria Gofind - Vetoquinol",
     page_icon="🚦",
     layout="wide"
 )
 
-st.title("🚦 Farol Consolidado de Saúde de Dados (Sellout + Estoque)")
-st.caption("Compilação automática UTF-8, formatação em Reais (R$) e matriz diária de acompanhamento.")
+st.title("🚦 Farol de Auditoria e Saúde de Dados (Gofind)")
+st.caption("Análise diária por CNPJ (desde Jan/2025), checagem de duplicidades e controle de estoque.")
 
-# Credenciais e Parâmetros
+# --- CREDENCIAIS E PARÂMETROS ---
 AWS_KEY = str(st.secrets.get("AWS_ACCESS_KEY_ID", "AKIARSGQ7ED4FB3WIUF5")).strip()
 AWS_SECRET = str(st.secrets.get("AWS_SECRET_ACCESS_KEY", "I/6iuAaECI9ukPUjQRU2AHIXHdvo2qOpEUaSR3S")).strip()
 BUCKET = "gofind-integration-file"
 PREFIX = "client-vetoquinol/"
 
-# Função Helper para Formatar Moeda Brasileira
 def formatar_real(valor):
     if pd.isna(valor):
         return "R$ 0,00"
     return f"R$ {valor:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
 
 @st.cache_data(ttl=300)
-def compilar_dados_s3(key, secret, bucket, prefix, subpasta):
-    """Lê e compila todos os arquivos CSV em UTF-8 garantindo tipos numéricos e datas"""
-    try:
-        s3 = boto3.client('s3', aws_access_key_id=key, aws_secret_access_key=secret, region_name='us-east-1')
-        path_prefix = f"{prefix}{subpasta}/"
-        response = s3.list_objects_v2(Bucket=bucket, Prefix=path_prefix)
-        arquivos = [obj['Key'] for obj in response.get('Contents', []) if obj['Key'].endswith('.csv')]
-        
-        if not arquivos:
-            return pd.DataFrame()
+def compilar_dados_completos(key, secret, bucket, prefix):
+    """Lê todos os CSVs de reports/ (incluindo Vetoquinol-dados-faltando.csv) e stock-reports/"""
+    s3 = boto3.client('s3', aws_access_key_id=key, aws_secret_access_key=secret, region_name='us-east-1')
+    
+    # 1. Compilação Sellout (reports/)
+    res_so = s3.list_objects_v2(Bucket=bucket, Prefix=f"{prefix}reports/")
+    arq_so = [obj['Key'] for obj in res_so.get('Contents', []) if obj['Key'].endswith('.csv')]
+    
+    dfs_so = []
+    for k in arq_so:
+        try:
+            obj = s3.get_object(Bucket=bucket, Key=k)
+            df_t = pd.read_csv(io.BytesIO(obj['Body'].read()), encoding='utf-8', dtype=str)
+            df_t['arquivo_origem'] = k.split('/')[-1]
+            dfs_so.append(df_t)
+        except Exception:
+            pass
             
-        lista_dfs = []
-        for file_key in arquivos:
-            obj = s3.get_object(Bucket=bucket, Key=file_key)
-            # Leitura explícita UTF-8 (Padrão Americano/Global)
-            df_temp = pd.read_csv(io.BytesIO(obj['Body'].read()), encoding='utf-8')
-            df_temp['arquivo_origem'] = file_key.split('/')[-1]
-            lista_dfs.append(df_temp)
+    df_sellout = pd.concat(dfs_so, ignore_index=True) if dfs_so else pd.DataFrame()
+
+    # 2. Compilação Estoque (stock-reports/)
+    res_st = s3.list_objects_v2(Bucket=bucket, Prefix=f"{prefix}stock-reports/")
+    arq_st = [obj['Key'] for obj in res_st.get('Contents', []) if obj['Key'].endswith('.csv')]
+    
+    dfs_st = []
+    for k in arq_st:
+        try:
+            obj = s3.get_object(Bucket=bucket, Key=k)
+            df_t = pd.read_csv(io.BytesIO(obj['Body'].read()), encoding='utf-8', dtype=str)
+            df_t['arquivo_origem'] = k.split('/')[-1]
+            dfs_st.append(df_t)
+        except Exception:
+            pass
             
-        df_consolidado = pd.concat(lista_dfs, ignore_index=True)
-        
-        # Trata colunas de datas
-        for col_dt in ['data', 'data_processamento']:
-            if col_dt in df_consolidado.columns:
-                df_consolidado[col_dt] = pd.to_datetime(df_consolidado[col_dt], errors='coerce')
-                df_consolidado['data_dt'] = df_consolidado[col_dt].dt.strftime('%Y-%m-%d')
-                
-        # Converte valores numéricos caso tenham vindo formatados
-        for col_num in ['preco_venda_total', 'preco_venda_unitario', 'quantidade_produtos', 'quantidade']:
-            if col_num in df_consolidado.columns:
-                df_consolidado[col_num] = pd.to_numeric(df_consolidado[col_num], errors='coerce').fillna(0)
-                
-        return df_consolidado
-    except Exception as e:
-        st.error(f"Erro ao ler subpasta UTF-8 '{subpasta}': {e}")
-        return pd.DataFrame()
+    df_stock = pd.concat(dfs_st, ignore_index=True) if dfs_st else pd.DataFrame()
 
-# Processamento
-with st.spinner("Compilando todos os CSVs UTF-8 do S3..."):
-    df_sellout = compilar_dados_s3(AWS_KEY, AWS_SECRET, BUCKET, PREFIX, "reports")
-    df_stock = compilar_dados_s3(AWS_KEY, AWS_SECRET, BUCKET, PREFIX, "stock-reports")
+    # Tratamento de Tipos - Sellout
+    if not df_sellout.empty:
+        df_sellout['quantidade_produtos'] = pd.to_numeric(df_sellout['quantidade_produtos'], errors='coerce').fillna(0)
+        df_sellout['preco_venda_total'] = pd.to_numeric(df_sellout['preco_venda_total'], errors='coerce').fillna(0)
+        df_sellout['dt_venda'] = pd.to_datetime(df_sellout['data'], errors='coerce').dt.strftime('%Y-%m-%d')
+        df_sellout['dt_proc'] = pd.to_datetime(df_sellout['data_processamento'], errors='coerce').dt.strftime('%Y-%m-%d')
 
-# Abas
-aba1, aba2, aba3 = st.tabs(["🚦 Farol Diário de Recebimento", "🧾 Sellout Consolidado", "📦 Estoque Consolidado"])
+    # Tratamento de Tipos - Estoque
+    if not df_stock.empty:
+        df_stock['quantidade'] = pd.to_numeric(df_stock['quantidade'], errors='coerce').fillna(0)
+        df_stock['dt_estoque'] = pd.to_datetime(df_stock['data'], errors='coerce').dt.strftime('%Y-%m-%d')
+
+    return df_sellout, df_stock
+
+# Carregamento dos dados
+with st.spinner("Compilando base histórica completa (incluindo dados-faltando.csv)..."):
+    df_sellout, df_stock = compilar_dados_completos(AWS_KEY, AWS_SECRET, BUCKET, PREFIX)
+
+aba1, aba2, aba3 = st.tabs(["📅 Matriz Diária por CNPJ (Jan/2025+)", "🚨 Auditoria de Duplicidades (Sellout)", "📦 Anomalias de Estoque (Stock)"])
 
 # ----------------------------------------------------
-# ABA 1: FAROL DIÁRIO DE RECEBIMENTO (ALERTAS)
+# ABA 1: MATRIZ CALENDÁRIO DIÁRIA POR CNPJ (JAN/2025 EM DIANTE)
 # ----------------------------------------------------
 with aba1:
-    st.subheader("Acompanhamento Diário por Distribuidor")
+    st.subheader("Acompanhamento Diário de Envios por CNPJ do Distribuidor")
     
-    if not df_sellout.empty and 'nome_distribuidor' in df_sellout.columns:
-        # Agrupa os recebimentos diários de notas e produtos Vetoquinol
-        farol_diario = df_sellout.groupby(['data_dt', 'nome_distribuidor']).agg(
-            Qtd_Notas=('nNF', 'nunique') if 'nNF' in df_sellout.columns else ('arquivo_origem', 'count'),
-            Produtos_Vetoquinol_Faturados=('quantidade_produtos', 'sum'),
-            Faturamento_Total=('preco_venda_total', 'sum'),
-            Notas_Canceladas=('status', lambda x: (x == 'CANCELADA').sum()) if 'status' in df_sellout.columns else ('arquivo_origem', 'count')
+    if not df_sellout.empty and 'distribuidor' in df_sellout.columns:
+        # Filtra datas a partir de 01/01/2025
+        df_so_filtered = df_sellout[df_sellout['dt_venda'] >= '2025-01-01'].copy()
+        
+        # Filtro de Seleção de Distribuidor
+        cnpjs_disponiveis = sorted(df_so_filtered['distribuidor'].dropna().unique())
+        cnpj_selecionado = st.selectbox("Selecione o CNPJ do Distribuidor para auditar a esteira diária:", options=["TODOS"] + cnpjs_disponiveis)
+        
+        if cnpj_selecionado != "TODOS":
+            df_so_filtered = df_so_filtered[df_so_filtered['distribuidor'] == cnpj_selecionado]
+
+        # Agrupamento Diário por CNPJ e Data
+        resumo_diario = df_so_filtered.groupby(['dt_venda', 'distribuidor', 'nome_distribuidor']).agg(
+            Notas_Faturadas=('nNF', 'nunique'),
+            Itens_Vendidos=('quantidade_produtos', 'sum'),
+            Faturamento=('preco_venda_total', 'sum'),
+            Notas_Canceladas=('status', lambda x: (x == 'CANCELADA').sum())
         ).reset_index()
 
-        # Aplicação das Regras do Farol (Verde, Amarelo, Vermelho)
-        def definir_status(row):
-            if row['Qtd_Notas'] > 0 and row['Produtos_Vetoquinol_Faturados'] > 0:
-                return "🟢 Tudo OK"
-            elif row['Qtd_Notas'] > 0 or row['Faturamento_Total'] > 0:
-                return "🟡 Atenção (Verificar)"
+        # Definição do Farol
+        def classificar_dia(row):
+            if row['Notas_Faturadas'] > 0 and row['Itens_Vendidos'] > 0:
+                return "🟢 Recebido c/ Vendas"
+            elif row['Notas_Faturadas'] > 0:
+                return "🟡 Apenas Notas s/ Volume"
             else:
-                return "🔴 Não Recebido / Sem Movimento"
+                return "🔴 Sem Recebimento"
 
-        farol_diario['Status_Farol'] = farol_diario.apply(definir_status, axis=1)
+        resumo_diario['Status_Farol'] = resumo_diario.apply(classificar_dia, axis=1)
 
-        # Métrica em Reais
-        faturamento_geral = df_sellout['preco_venda_total'].sum() if 'preco_venda_total' in df_sellout.columns else 0
-        
-        c1, c2, c3, c4 = st.columns(4)
-        c1.metric("Faturamento Compilado Total", formatar_real(faturamento_geral))
-        c2.metric("Total Notas Faturadas", int(farol_diario['Qtd_Notas'].sum()))
-        c3.metric("Produtos Vetoquinol Faturados", int(farol_diario['Produtos_Vetoquinol_Faturados'].sum()))
-        c4.metric("Registros em Alerta (Amarelo)", len(farol_diario[farol_diario['Status_Farol'].str.contains("🟡")]))
+        st.markdown("##### Resumo Executivo da Seleção")
+        m1, m2, m3, m4 = st.columns(4)
+        m1.metric("Dias Analisados c/ Movimento", resumo_diario['dt_venda'].nunique())
+        m2.metric("Total de Notas Processadas", int(resumo_diario['Notas_Faturadas'].sum()))
+        m3.metric("Total de Itens Vetoquinol", int(resumo_diario['Itens_Vendidos'].sum()))
+        m4.metric("Faturamento Total", formatar_real(resumo_diario['Faturamento'].sum()))
 
         st.divider()
-        st.markdown("##### Tabela do Farol Diário de Envios")
+        st.markdown("##### Tabela Diária Detalhada")
         
-        # Formata a coluna de faturamento na exibição
-        farol_exibicao = farol_diario.copy()
-        farol_exibicao['Faturamento_Total'] = farol_exibicao['Faturamento_Total'].apply(formatar_real)
-        
-        st.dataframe(
-            farol_exibicao.sort_values(by='data_dt', ascending=False),
-            use_container_width=True
-        )
-    else:
-        st.info("Nenhum dado consolidado para gerar o Farol.")
+        resumo_exibicao = resumo_diario.copy()
+        resumo_exibicao['Faturamento'] = resumo_exibicao['Faturamento'].apply(formatar_real)
+        st.dataframe(resumo_exibicao.sort_values(by=['dt_venda', 'distribuidor'], ascending=[False, True]), use_container_width=True)
 
 # ----------------------------------------------------
-# ABA 2: SELLOUT CONSOLIDADO
+# ABA 2: AUDITORIA RIGOROSA DE DUPLICIDADE (SELLOUT)
 # ----------------------------------------------------
 with aba2:
-    st.subheader("Base Unificada de Sellout (Formatação em Reais R$)")
+    st.subheader("Detecção de Linhas e Notas Duplicadas")
+    st.markdown("Verificação do cruzamento: `[nfeId + número nota (nNF) + CNPJ distribuidor + CNPJ cliente (loja) + Produto (gtin) + Data Processamento]`")
+    
     if not df_sellout.empty:
-        df_so_view = df_sellout.copy()
-        if 'preco_venda_total' in df_so_view.columns:
-            df_so_view['preco_venda_total_R$'] = df_so_view['preco_venda_total'].apply(formatar_real)
-        if 'preco_venda_unitario' in df_so_view.columns:
-            df_so_view['preco_venda_unitario_R$'] = df_so_view['preco_venda_unitario'].apply(formatar_real)
-            
-        st.dataframe(df_so_view, use_container_width=True)
+        cols_chave_so = ['nfeId', 'nNF', 'distribuidor', 'loja', 'gtin', 'dt_proc']
+        cols_presentes = [c for c in cols_chave_so if c in df_sellout.columns]
+        
+        # Identificação de registros duplicados
+        duplicados_mask = df_sellout.duplicated(subset=cols_presentes, keep=False)
+        df_duplicados_so = df_sellout[duplicados_mask].sort_values(by=cols_presentes)
+        
+        q1, q2 = st.columns(2)
+        q1.metric("Total de Linhas na Base Consolidada", len(df_sellout))
+        q2.metric("Linhas Identificadas como DUPLICADAS", len(df_duplicados_so), delta_color="inverse")
+        
+        if not df_duplicados_so.empty:
+            st.error(f"🚨 Atenção: Foram encontradas {len(df_duplicados_so)} linhas com combinação idêntica de NfeId, Nota, CNPJ Distribuidor, Cliente, Produto e Data de Processamento!")
+            st.dataframe(df_duplicados_so[['nfeId', 'nNF', 'distribuidor', 'nome_distribuidor', 'loja', 'gtin', 'nome_produto', 'dt_proc', 'arquivo_origem']], use_container_width=True)
+        else:
+            st.success("✅ Nenhuma duplicidade encontrada com a chave exata informada!")
 
 # ----------------------------------------------------
-# ABA 3: ESTOQUE CONSOLIDADO
+# ABA 3: ANOMALIAS DE ESTOQUE (MULTI-ENVIO)
 # ----------------------------------------------------
 with aba3:
-    st.subheader("Base Unificada de Estoque Diário")
+    st.subheader("Validação de Multi-Envios e Duplicidades no Estoque")
+    st.markdown("Verificação de envio repetido: `[Mesmo Distribuidor (cnpj_loja) + Mesmo Produto (ean) + Mesma Quantidade na Mesma Data]`")
+    
     if not df_stock.empty:
-        st.dataframe(df_stock, use_container_width=True)
+        cols_chave_st = ['cnpj_loja', 'ean', 'quantidade', 'dt_estoque']
+        cols_st_presentes = [c for c in cols_chave_st if c in df_stock.columns]
+        
+        duplicados_st_mask = df_stock.duplicated(subset=cols_st_presentes, keep=False)
+        df_duplicados_st = df_stock[duplicados_st_mask].sort_values(by=cols_st_presentes)
+        
+        e1, e2 = st.columns(2)
+        e1.metric("Total de Registros de Estoque", len(df_stock))
+        e2.metric("Registros de Estoque Duplicados no Mesmo Dia", len(df_duplicados_st), delta_color="inverse")
+        
+        if not df_duplicados_st.empty:
+            st.warning(f"⚠️ Identificados {len(df_duplicados_st)} registros de estoque com o mesmo produto, distribuidor e saldo no mesmo dia!")
+            st.dataframe(df_duplicados_st[['dt_estoque', 'cnpj_loja', 'nome_loja', 'ean', 'nome_produto', 'quantidade', 'arquivo_origem']], use_container_width=True)
+        else:
+            st.success("✅ Nenhum multi-envio de estoque duplicado detectado!")

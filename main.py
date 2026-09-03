@@ -2,7 +2,6 @@ import streamlit as st
 import pandas as pd
 import boto3
 import io
-import plotly.express as px
 from datetime import datetime, date
 
 st.set_page_config(
@@ -29,7 +28,7 @@ def formatar_real(valor):
 def carregar_e_compilar_tudo(key, secret, bucket, prefix):
     s3 = boto3.client('s3', aws_access_key_id=key, aws_secret_access_key=secret, region_name='us-east-1')
     
-    # 1. Carregar SELLOUT (reports/ + dados-faltando.csv)
+    # 1. SELLOUT
     res_so = s3.list_objects_v2(Bucket=bucket, Prefix=f"{prefix}reports/")
     arq_so = [obj['Key'] for obj in res_so.get('Contents', []) if obj['Key'].endswith('.csv')]
     
@@ -45,7 +44,7 @@ def carregar_e_compilar_tudo(key, secret, bucket, prefix):
             
     df_sellout = pd.concat(dfs_so, ignore_index=True) if dfs_so else pd.DataFrame()
 
-    # 2. Carregar ESTOQUE (stock-reports/)
+    # 2. ESTOQUE
     res_st = s3.list_objects_v2(Bucket=bucket, Prefix=f"{prefix}stock-reports/")
     arq_st = [obj['Key'] for obj in res_st.get('Contents', []) if obj['Key'].endswith('.csv')]
     
@@ -67,18 +66,30 @@ def carregar_e_compilar_tudo(key, secret, bucket, prefix):
         df_sellout['preco_venda_total'] = pd.to_numeric(df_sellout['preco_venda_total'], errors='coerce').fillna(0)
         df_sellout['dt_venda'] = pd.to_datetime(df_sellout['data'], errors='coerce').dt.strftime('%Y-%m-%d')
         df_sellout['dt_proc'] = pd.to_datetime(df_sellout['data_processamento'], errors='coerce').dt.strftime('%Y-%m-%d')
-        df_sellout['distribuidor_clean'] = df_sellout['distribuidor'].str.zfill(14)
+        df_sellout['distribuidor_clean'] = df_sellout['distribuidor'].astype(str).str.replace(r'\D', '', regex=True).str.zfill(14)
 
     # Tratamento Estoque
     if not df_stock.empty:
         df_stock['quantidade'] = pd.to_numeric(df_stock['quantidade'], errors='coerce').fillna(0)
         df_stock['dt_estoque'] = pd.to_datetime(df_stock['data'], errors='coerce').dt.strftime('%Y-%m-%d')
-        df_stock['cnpj_clean'] = df_stock['cnpj_loja'].str.zfill(14)
+        df_stock['cnpj_clean'] = df_stock['cnpj_loja'].astype(str).str.replace(r'\D', '', regex=True).str.zfill(14)
 
     return df_sellout, df_stock
 
 with st.spinner("Compilando base completa do S3..."):
     df_sellout, df_stock = carregar_e_compilar_tudo(AWS_KEY, AWS_SECRET, BUCKET, PREFIX)
+
+# --- TRATAMENTO SEGURO DA LISTA DE CNPJS (CORREÇÃO DO BUG) ---
+cnpjs_so = [str(x) for x in df_sellout['distribuidor_clean'].dropna().unique() if str(x).strip() != ''] if not df_sellout.empty else []
+cnpjs_st = [str(x) for x in df_stock['cnpj_clean'].dropna().unique() if str(x).strip() != ''] if not df_stock.empty else []
+cnpjs_todos = sorted(list(set(cnpjs_so + cnpjs_st)))
+
+# Mapeamento de Nomes
+mapa_nomes = {}
+if not df_sellout.empty:
+    mapa_nomes.update(df_sellout.set_index('distribuidor_clean')['nome_distribuidor'].dropna().to_dict())
+if not df_stock.empty:
+    mapa_nomes.update(df_stock.set_index('cnpj_clean')['nome_loja'].dropna().to_dict())
 
 # --- NAVEGAÇÃO ---
 aba1, aba2, aba3, aba4 = st.tabs([
@@ -88,33 +99,23 @@ aba1, aba2, aba3, aba4 = st.tabs([
     "📊 Tabela Completa de Estoque"
 ])
 
-# Lista Mestra de CNPJs (Sellout + Estoque)
-cnpjs_so = df_sellout['distribuidor_clean'].unique().tolist() if not df_sellout.empty else []
-cnpjs_st = df_stock['cnpj_clean'].unique().tolist() if not df_stock.empty else []
-cnpjs_todos = sorted(list(set(cnpjs_so + cnpjs_st)))
-
-# Mapeamento de CNPJ para Nome Fantasia
-mapa_nomes = {}
-if not df_sellout.empty:
-    mapa_nomes.update(df_sellout.set_index('distribuidor_clean')['nome_distribuidor'].to_dict())
-if not df_stock.empty:
-    mapa_nomes.update(df_stock.set_index('cnpj_clean')['nome_loja'].to_dict())
-
 # ----------------------------------------------------
-# ABA 1: FAROL DIÁRIO DE SELLOUT (JAN/2025 ATÉ HOJE)
+# ABA 1: FAROL DIÁRIO DE SELLOUT
 # ----------------------------------------------------
 with aba1:
     st.subheader("Esteira Diária de Sellout por CNPJ")
     
-    cnpj_sel_so = st.selectbox("Selecione o Distribuidor (CNPJ):", options=cnpjs_todos, format_func=lambda x: f"{x} - {mapa_nomes.get(x, 'Desconhecido')}")
+    cnpj_sel_so = st.selectbox(
+        "Selecione o Distribuidor (CNPJ):", 
+        options=cnpjs_todos, 
+        format_func=lambda x: f"{x} - {mapa_nomes.get(x, 'Distribuidor ' + x)}"
+    )
     
     if cnpj_sel_so:
-        # Gera o calendário diário continuo de 01/01/2025 até Hoje
         datas_cal = pd.date_range(start="2025-01-01", end=date.today().strftime('%Y-%m-%d')).strftime('%Y-%m-%d').tolist()
         df_cal_so = pd.DataFrame({'dt_venda': datas_cal})
         df_cal_so['distribuidor_clean'] = cnpj_sel_so
         
-        # Dados do distribuidor
         df_so_cnpj = df_sellout[df_sellout['distribuidor_clean'] == cnpj_sel_so] if not df_sellout.empty else pd.DataFrame()
         
         if not df_so_cnpj.empty:
@@ -139,9 +140,8 @@ with aba1:
                 return "🔴 Não Enviou Nota"
 
         df_farol_so['Farol_Sellout'] = df_farol_so.apply(status_so, axis=1)
-        df_farol_so['Nome_Distribuidor'] = mapa_nomes.get(cnpj_sel_so, "-")
+        df_farol_so['Nome_Distribuidor'] = mapa_nomes.get(cnpj_sel_so, cnpj_sel_so)
         
-        # KPIs
         d1, d2, d3, d4 = st.columns(4)
         d1.metric("Dias sem Envio de Nota (🔴)", len(df_farol_so[df_farol_so['Farol_Sellout'].str.contains("🔴")]))
         d2.metric("Dias com Vendas (🟢)", len(df_farol_so[df_farol_so['Farol_Sellout'].str.contains("🟢")]))
@@ -154,12 +154,17 @@ with aba1:
         st.dataframe(exib_so[['dt_venda', 'distribuidor_clean', 'Nome_Distribuidor', 'Farol_Sellout', 'Qtd_Notas', 'Itens_Vendidos', 'Faturamento']].sort_values(by='dt_venda', ascending=False), use_container_width=True)
 
 # ----------------------------------------------------
-# ABA 2: FAROL DIÁRIO DE ESTOQUE (JAN/2025 ATÉ HOJE)
+# ABA 2: FAROL DIÁRIO DE ESTOQUE
 # ----------------------------------------------------
 with aba2:
     st.subheader("Esteira Diária de Envio de Estoque (Stock Reports)")
     
-    cnpj_sel_st = st.selectbox("Selecione o Distribuidor para Estoque:", options=cnpjs_todos, key="st_sel", format_func=lambda x: f"{x} - {mapa_nomes.get(x, 'Desconhecido')}")
+    cnpj_sel_st = st.selectbox(
+        "Selecione o Distribuidor para Estoque:", 
+        options=cnpjs_todos, 
+        key="st_sel", 
+        format_func=lambda x: f"{x} - {mapa_nomes.get(x, 'Distribuidor ' + x)}"
+    )
     
     if cnpj_sel_st:
         datas_cal = pd.date_range(start="2025-01-01", end=date.today().strftime('%Y-%m-%d')).strftime('%Y-%m-%d').tolist()
@@ -188,7 +193,7 @@ with aba2:
                 return "🔴 Estoque Ausente"
 
         df_farol_st['Farol_Estoque'] = df_farol_st.apply(status_st, axis=1)
-        df_farol_st['Nome_Distribuidor'] = mapa_nomes.get(cnpj_sel_st, "-")
+        df_farol_st['Nome_Distribuidor'] = mapa_nomes.get(cnpj_sel_st, cnpj_sel_st)
         
         s1, s2, s3 = st.columns(3)
         s1.metric("Dias c/ Estoque Recebido (🟢)", len(df_farol_st[df_farol_st['Farol_Estoque'].str.contains("🟢")]))
@@ -199,7 +204,7 @@ with aba2:
         st.dataframe(df_farol_st[['dt_estoque', 'cnpj_clean', 'Nome_Distribuidor', 'Farol_Estoque', 'Registros_Estoque', 'Produtos_Distintos', 'Saldo_Total_Itens']].sort_values(by='dt_estoque', ascending=False), use_container_width=True)
 
 # ----------------------------------------------------
-# ABA 3: AUDITORIA SELLOUT (DUPLICIDADES)
+# ABA 3: AUDITORIA SELLOUT
 # ----------------------------------------------------
 with aba3:
     st.subheader("Auditoria de Notas e Linhas Duplicadas em Sellout")
@@ -212,16 +217,13 @@ with aba3:
         st.dataframe(dup_so, use_container_width=True)
 
 # ----------------------------------------------------
-# ABA 4: TABELA COMPLETA DE ESTOQUE + ANÁLISE DE DUPLICADOS
+# ABA 4: TABELA COMPLETA DE ESTOQUE + DUPLICADOS
 # ----------------------------------------------------
 with aba4:
     st.subheader("Base de Dados Completa de Estoque Diário")
-    st.markdown("Exibição de todos os registros com flag de **duplicidade de envio no mesmo dia**.")
-    
     if not df_stock.empty:
         cols_chave_st = ['cnpj_clean', 'ean', 'quantidade', 'dt_estoque']
         
-        # Identifica se a linha é uma duplicata idêntica no mesmo dia
         df_stock_analise = df_stock.copy()
         df_stock_analise['Duplicado_no_Dia'] = df_stock_analise.duplicated(subset=cols_chave_st, keep=False)
         df_stock_analise['Status_Linha'] = df_stock_analise['Duplicado_no_Dia'].apply(lambda x: "⚠️ Repetido no Dia" if x else "✅ Ok")

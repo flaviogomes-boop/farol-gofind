@@ -13,107 +13,67 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# --- ESTILIZAÇÃO CSS (MANUAL DE MARCA GOFIND + PORTAL GOFIND) ---
+# --- ESTILIZAÇÃO COMPATÍVEL COM O PORTAL GOFIND ---
 st.markdown("""
 <style>
     @import url('https://fonts.googleapis.com/css2?family=Kumbh+Sans:wght@400;600;700&family=Raleway:wght@400;500;600&display=swap');
 
     html, body, [class*="css"] {
         font-family: 'Raleway', sans-serif;
-        color: #444444;
     }
     
-    /* Fundo da Área Principal */
-    .stApp {
-        background-color: #F8F9FA;
-    }
-
-    /* Sidebar Estilo Portal Gofind (#0E3940) */
+    /* Sidebar Estilo Portal (#0E3940) */
     [data-testid="stSidebar"] {
         background-color: #0E3940 !important;
-        color: #FFFFFF !important;
     }
     [data-testid="stSidebar"] * {
         color: #FFFFFF !important;
     }
     
     /* Títulos Kumbh Sans */
-    h1, h2, h3, h4, .stMarkdown h1, .stMarkdown h2, .stMarkdown h3 {
+    h1, h2, h3, h4 {
         font-family: 'Kumbh Sans', sans-serif !important;
         color: #0E3940 !important;
         font-weight: 700;
     }
 
-    /* Estilo do Logo Header */
-    .gofind-header {
-        display: flex;
-        align-items: center;
-        gap: 12px;
-        padding: 10px 0px 20px 0px;
-        border-bottom: 1px solid rgba(255,255,255,0.1);
-        margin-bottom: 20px;
-    }
-    .gofind-logo-text {
-        font-family: 'Kumbh Sans', sans-serif;
-        font-size: 26px;
-        font-weight: 700;
-        color: #93C400 !important;
-        letter-spacing: -0.5px;
-    }
-    .gofind-logo-dot {
-        color: #93C400;
-    }
-
-    /* Abas Customizadas */
-    .stTabs [data-baseweb="tab-list"] {
-        gap: 8px;
+    /* Estilo dos Botões de Menu na Sidebar */
+    div.stRadio > div {
         background-color: transparent;
+        gap: 8px;
     }
-    .stTabs [data-baseweb="tab"] {
-        height: 45px;
-        background-color: #FFFFFF;
+    div.stRadio > div > label {
+        background-color: rgba(255, 255, 255, 0.05);
+        border: 1px solid rgba(255, 255, 255, 0.1);
+        padding: 10px 14px;
         border-radius: 6px;
-        color: #0E3940;
-        font-weight: 600;
-        font-family: 'Kumbh Sans', sans-serif;
-        border: 1px solid #E2E8F0;
+        cursor: pointer;
+        width: 100%;
+        transition: all 0.2s;
     }
-    .stTabs [aria-selected="true"] {
+    div.stRadio > div > label:hover {
+        background-color: rgba(147, 196, 0, 0.2);
+        border-color: #93C400;
+    }
+    div.stRadio > div [data-checked="true"] {
         background-color: #93C400 !important;
-        color: #FFFFFF !important;
         border-color: #93C400 !important;
     }
-
-    /* Cards e Métricas */
+    div.stRadio > div [data-checked="true"] * {
+        color: #FFFFFF !important;
+        font-weight: 600;
+    }
+    
+    /* Cards de Métricas */
     [data-testid="stMetric"] {
         background-color: #FFFFFF;
         padding: 15px;
         border-radius: 8px;
         border-left: 5px solid #93C400;
-        box-shadow: 0 1px 3px rgba(0,0,0,0.05);
-    }
-    [data-testid="stMetricLabel"] {
-        font-family: 'Kumbh Sans', sans-serif;
-        color: #0E3940 !important;
-        font-weight: 600;
+        box-shadow: 0 1px 3px rgba(0,0,0,0.08);
     }
 </style>
 """, unsafe_allow_html=True)
-
-# --- SIDEBAR FIXA (ESTILO PORTAL) ---
-with st.sidebar:
-    st.markdown("""
-        <div class="gofind-header">
-            <svg width="36" height="24" viewBox="0 0 120 80" fill="none" xmlns="http://www.w3.org/2000/svg">
-                <path d="M30 40C30 23.4315 43.4315 10 60 10C76.5685 10 90 23.4315 90 40C90 56.5685 76.5685 70 60 70C43.4315 70 30 56.5685 30 40Z" fill="#93C400"/>
-                <circle cx="35" cy="40" r="12" fill="#0E3940"/>
-            </svg>
-            <span class="gofind-logo-text">go<span style="color:#93C400;">find</span></span>
-        </div>
-    """, unsafe_allow_html=True)
-    st.write("👤 **Olá, vetoquinol@gofind.online**")
-    st.write("🏢 **Cliente:** Vetoquinol")
-    st.divider()
 
 # Credenciais S3
 AWS_KEY = str(st.secrets.get("AWS_ACCESS_KEY_ID", "AKIARSGQ7ED4FB3WIUF5")).strip()
@@ -174,7 +134,7 @@ def carregar_e_compilar_tudo(key, secret, bucket, prefix):
 
     return df_sellout, df_stock
 
-with st.spinner("Carregando bases do S3..."):
+with st.spinner("Carregando base de dados da Gofind..."):
     df_sellout, df_stock = carregar_e_compilar_tudo(AWS_KEY, AWS_SECRET, BUCKET, PREFIX)
 
 cnpjs_so = [str(x) for x in df_sellout['distribuidor_clean'].dropna().unique() if str(x).strip() != ''] if not df_sellout.empty else []
@@ -187,19 +147,29 @@ if not df_sellout.empty:
 if not df_stock.empty:
     mapa_nomes.update(df_stock.set_index('cnpj_clean')['nome_loja'].dropna().to_dict())
 
-# Cálculo da Média Diária Histórica por Distribuidor (para o Alerta Amarelo)
+# Média Histórica para o Alerta Amarelo
 medias_diarias_dist = {}
 if not df_sellout.empty:
     daily_dist = df_sellout.groupby(['distribuidor_clean', 'dt_venda'])['quantidade_produtos'].sum().reset_index()
     medias_diarias_dist = daily_dist.groupby('distribuidor_clean')['quantidade_produtos'].mean().to_dict()
 
-# Abas
-aba1, aba2, aba3, aba4 = st.tabs([
-    "📅 Calendário Farol - Sellout", 
-    "📦 Calendário Farol - Estoque", 
-    "🚨 Auditoria Sellout (Duplicidades)", 
-    "📊 Tabela Completa de Estoque"
-])
+# --- SIDEBAR: MENU LATERAL GOFIND ---
+with st.sidebar:
+    logo_url = "https://raw.githubusercontent.com/gofind-online/assets/main/logo-gofind-white.png"
+    st.image(logo_url, width=160)
+    st.markdown("<p style='color:#93C400; font-weight:600; font-size:12px; margin-top:-10px; margin-bottom:20px;'>FAROL DE SAÚDE DE DADOS</p>", unsafe_allow_html=True)
+    
+    st.markdown("### Menu Principal")
+    aba_selecionada = st.radio(
+        "Navegue pelas visões:",
+        [
+            "📅 Calendário - Sellout", 
+            "📦 Calendário - Estoque", 
+            "🚨 Auditoria Sellout", 
+            "📊 Base de Estoque"
+        ],
+        label_visibility="collapsed"
+    )
 
 def render_controles_data(key_prefix):
     col_tipo, col_m, col_a, col_custom = st.columns([2, 2, 2, 4])
@@ -218,10 +188,10 @@ def render_controles_data(key_prefix):
     return pd.date_range(dt_inicio, dt_fim).strftime('%Y-%m-%d').tolist()
 
 # ----------------------------------------------------
-# ABA 1: CALENDÁRIO SELLOUT
+# VISÃO 1: CALENDÁRIO SELLOUT
 # ----------------------------------------------------
-with aba1:
-    st.subheader("Calendário de Acompanhamento Diário - Sellout")
+if aba_selecionada == "📅 Calendário - Sellout":
+    st.title("📅 Calendário de Acompanhamento Diário - Sellout")
     datas_periodo_so = render_controles_data("so")
     
     base_grade_so = [{'dt_venda': d, 'distribuidor_clean': c} for d in datas_periodo_so for c in cnpjs_todos]
@@ -240,7 +210,6 @@ with aba1:
         df_cross_so['Itens_Vendidos'] = 0
         df_cross_so['Faturamento'] = 0.0
 
-    # Lógica do Farol Amarelo (Média Histórica)
     def def_status_so(r):
         med = medias_diarias_dist.get(r['distribuidor_clean'], 0)
         if r['Qtd_Notas'] == 0 or r['Itens_Vendidos'] == 0:
@@ -277,10 +246,10 @@ with aba1:
     st.dataframe(exib_so[['distribuidor_clean', 'Nome_Distribuidor', 'Qtd_Notas', 'Itens_Vendidos', 'Media_Historica_Diaria', 'Faturamento']], use_container_width=True)
 
 # ----------------------------------------------------
-# ABA 2: CALENDÁRIO ESTOQUE
+# VISÃO 2: CALENDÁRIO ESTOQUE
 # ----------------------------------------------------
-with aba2:
-    st.subheader("Calendário de Acompanhamento Diário - Estoque (Stock)")
+elif aba_selecionada == "📦 Calendário - Estoque":
+    st.title("📦 Calendário de Acompanhamento Diário - Estoque (Stock)")
     datas_periodo_st = render_controles_data("st")
     
     base_grade_st = [{'dt_estoque': d, 'cnpj_clean': c} for d in datas_periodo_st for c in cnpjs_todos]
@@ -319,10 +288,10 @@ with aba2:
     st.dataframe(detalhe_st[['cnpj_clean', 'Nome_Distribuidor', 'Registros', 'Produtos_Distintos', 'Saldo_Itens']], use_container_width=True)
 
 # ----------------------------------------------------
-# ABA 3: AUDITORIA SELLOUT
+# VISÃO 3: AUDITORIA SELLOUT
 # ----------------------------------------------------
-with aba3:
-    st.subheader("Auditoria de Notas e Linhas Duplicadas em Sellout")
+elif aba_selecionada == "🚨 Auditoria Sellout":
+    st.title("🚨 Auditoria de Notas e Linhas Duplicadas em Sellout")
     if not df_sellout.empty:
         cols_p = [c for c in ['nfeId', 'nNF', 'distribuidor', 'loja', 'gtin', 'dt_proc'] if c in df_sellout.columns]
         dup_so = df_sellout[df_sellout.duplicated(subset=cols_p, keep=False)].sort_values(by=cols_p)
@@ -330,10 +299,10 @@ with aba3:
         st.dataframe(dup_so, use_container_width=True)
 
 # ----------------------------------------------------
-# ABA 4: TABELA COMPLETA DE ESTOQUE
+# VISÃO 4: TABELA COMPLETA DE ESTOQUE
 # ----------------------------------------------------
-with aba4:
-    st.subheader("Base de Dados Completa de Estoque Diário")
+elif aba_selecionada == "📊 Base de Estoque":
+    st.title("📊 Base de Dados Completa de Estoque Diário")
     if not df_stock.empty:
         cols_st = ['cnpj_clean', 'ean', 'quantidade', 'dt_estoque']
         df_stock_analise = df_stock.copy()

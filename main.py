@@ -13,7 +13,7 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# --- ESTILIZAÇÃO COMPATÍVEL COM O PORTAL GOFIND ---
+# --- ESTILIZAÇÃO COMPATÍVEL COM O PORTAL GOFIND (TEMA ESCURO) ---
 st.markdown("""
 <style>
     @import url('https://fonts.googleapis.com/css2?family=Kumbh+Sans:wght@400;600;700&family=Raleway:wght@400;500;600&display=swap');
@@ -30,11 +30,11 @@ st.markdown("""
         color: #FFFFFF !important;
     }
     
-    /* Títulos Kumbh Sans */
-    h1, h2, h3, h4 {
+    /* Títulos em Verde Gofind (#93C400) para Alto Contraste */
+    h1, h2, h3, h4, .stMarkdown h1, .stMarkdown h2, .stMarkdown h3 {
         font-family: 'Kumbh Sans', sans-serif !important;
-        color: #0E3940 !important;
-        font-weight: 700;
+        color: #93C400 !important;
+        font-weight: 700 !important;
     }
 
     /* Estilo dos Botões de Menu na Sidebar */
@@ -64,18 +64,27 @@ st.markdown("""
         font-weight: 600;
     }
     
-    /* Cards de Métricas */
+    /* Correção de Métricas (Sem caixas brancas) */
     [data-testid="stMetric"] {
-        background-color: #FFFFFF;
+        background-color: #0E3940 !important;
         padding: 15px;
         border-radius: 8px;
-        border-left: 5px solid #93C400;
-        box-shadow: 0 1px 3px rgba(0,0,0,0.08);
+        border: 1px solid #93C400 !important;
+        box-shadow: 0 2px 4px rgba(0,0,0,0.2);
+    }
+    [data-testid="stMetricLabel"] {
+        color: #93C400 !important;
+        font-family: 'Kumbh Sans', sans-serif;
+        font-weight: 600;
+    }
+    [data-testid="stMetricValue"] {
+        color: #FFFFFF !important;
+        font-size: 28px !important;
     }
 </style>
 """, unsafe_allow_html=True)
 
-# Credenciais S3
+# Credenciais AWS S3
 AWS_KEY = str(st.secrets.get("AWS_ACCESS_KEY_ID", "AKIARSGQ7ED4FB3WIUF5")).strip()
 AWS_SECRET = str(st.secrets.get("AWS_SECRET_ACCESS_KEY", "I/6iuAaECI9ukPUjQRU2AHIXHdvo2qOpEUaSR3S")).strip()
 BUCKET = "gofind-integration-file"
@@ -155,8 +164,13 @@ if not df_sellout.empty:
 
 # --- SIDEBAR: MENU LATERAL GOFIND ---
 with st.sidebar:
-    logo_url = "https://raw.githubusercontent.com/gofind-online/assets/main/logo-gofind-white.png"
-    st.image(logo_url, width=160)
+    # Tenta carregar o logo local ou via GitHub
+    try:
+        st.image("logo.png", width=160)
+    except Exception:
+        logo_url = "https://raw.githubusercontent.com/gofind-online/assets/main/logo-gofind-white.png"
+        st.image(logo_url, width=160)
+        
     st.markdown("<p style='color:#93C400; font-weight:600; font-size:12px; margin-top:-10px; margin-bottom:20px;'>FAROL DE SAÚDE DE DADOS</p>", unsafe_allow_html=True)
     
     st.markdown("### Menu Principal")
@@ -171,7 +185,7 @@ with st.sidebar:
         label_visibility="collapsed"
     )
 
-def render_controles_data(key_prefix):
+def render_controles_data_e_distribuidores(key_prefix):
     col_tipo, col_m, col_a, col_custom = st.columns([2, 2, 2, 4])
     tipo_busca = col_tipo.radio("Modo de Visão:", ["Mês Recorrente", "Período Personalizado"], key=f"{key_prefix}_tipo", horizontal=True)
     today = date.today()
@@ -185,20 +199,37 @@ def render_controles_data(key_prefix):
         datas = col_custom.date_input("Selecione o Período:", [date(2025, 1, 1), today], key=f"{key_prefix}_custom")
         dt_inicio = datas[0] if len(datas) > 0 else date(2025, 1, 1)
         dt_fim = datas[1] if len(datas) > 1 else today
-    return pd.date_range(dt_inicio, dt_fim).strftime('%Y-%m-%d').tolist()
+        
+    datas_periodo = pd.date_range(dt_inicio, dt_fim).strftime('%Y-%m-%d').tolist()
+    
+    # Filtro de Grupo de Distribuidores
+    opcoes_dist = [f"{c} - {mapa_nomes.get(c, 'Distribuidor ' + c)}" for c in cnpjs_todos]
+    dist_selecionados = st.multiselect(
+        "Filtrar Distribuidores Específicos (Deixe em branco para analisar TODOS):",
+        options=opcoes_dist,
+        key=f"{key_prefix}_dists"
+    )
+    
+    if dist_selecionados:
+        cnpjs_filtrados = [d.split(" - ")[0] for d in dist_selecionados]
+    else:
+        cnpjs_filtrados = cnpjs_todos
+        
+    return datas_periodo, cnpjs_filtrados
 
 # ----------------------------------------------------
 # VISÃO 1: CALENDÁRIO SELLOUT
 # ----------------------------------------------------
 if aba_selecionada == "📅 Calendário - Sellout":
     st.title("📅 Calendário de Acompanhamento Diário - Sellout")
-    datas_periodo_so = render_controles_data("so")
+    datas_periodo_so, cnpjs_alvo_so = render_controles_data_e_distribuidores("so")
     
-    base_grade_so = [{'dt_venda': d, 'distribuidor_clean': c} for d in datas_periodo_so for c in cnpjs_todos]
+    base_grade_so = [{'dt_venda': d, 'distribuidor_clean': c} for d in datas_periodo_so for c in cnpjs_alvo_so]
     df_grid_so = pd.DataFrame(base_grade_so)
     
     if not df_sellout.empty:
-        agg_so = df_sellout.groupby(['dt_venda', 'distribuidor_clean']).agg(
+        df_so_filtered = df_sellout[df_sellout['distribuidor_clean'].isin(cnpjs_alvo_so)]
+        agg_so = df_so_filtered.groupby(['dt_venda', 'distribuidor_clean']).agg(
             Qtd_Notas=('nNF', 'nunique'),
             Itens_Vendidos=('quantidade_produtos', 'sum'),
             Faturamento=('preco_venda_total', 'sum')
@@ -250,13 +281,14 @@ if aba_selecionada == "📅 Calendário - Sellout":
 # ----------------------------------------------------
 elif aba_selecionada == "📦 Calendário - Estoque":
     st.title("📦 Calendário de Acompanhamento Diário - Estoque (Stock)")
-    datas_periodo_st = render_controles_data("st")
+    datas_periodo_st, cnpjs_alvo_st = render_controles_data_e_distribuidores("st")
     
-    base_grade_st = [{'dt_estoque': d, 'cnpj_clean': c} for d in datas_periodo_st for c in cnpjs_todos]
+    base_grade_st = [{'dt_estoque': d, 'cnpj_clean': c} for d in datas_periodo_st for c in cnpjs_alvo_st]
     df_grid_st = pd.DataFrame(base_grade_st)
     
     if not df_stock.empty:
-        agg_st = df_stock.groupby(['dt_estoque', 'cnpj_clean']).agg(
+        df_st_filtered = df_stock[df_stock['cnpj_clean'].isin(cnpjs_alvo_st)]
+        agg_st = df_st_filtered.groupby(['dt_estoque', 'cnpj_clean']).agg(
             Registros=('quantidade', 'count'),
             Saldo_Itens=('quantidade', 'sum'),
             Produtos_Distintos=('ean', 'nunique')
@@ -295,17 +327,26 @@ elif aba_selecionada == "🚨 Auditoria Sellout":
     if not df_sellout.empty:
         cols_p = [c for c in ['nfeId', 'nNF', 'distribuidor', 'loja', 'gtin', 'dt_proc'] if c in df_sellout.columns]
         dup_so = df_sellout[df_sellout.duplicated(subset=cols_p, keep=False)].sort_values(by=cols_p)
-        st.metric("Total Linhas Duplicadas em Sellout", len(dup_so), delta_color="inverse")
+        
+        st.metric("Total Linhas Duplicadas em Sellout", len(dup_so))
         st.dataframe(dup_so, use_container_width=True)
 
 # ----------------------------------------------------
-# VISÃO 4: TABELA COMPLETA DE ESTOQUE
+# VISÃO 4: TABELA COMPLETA DE ESTOQUE + FILTRO POR DISTRIBUIDOR
 # ----------------------------------------------------
 elif aba_selecionada == "📊 Base de Estoque":
     st.title("📊 Base de Dados Completa de Estoque Diário")
     if not df_stock.empty:
+        opcoes_dist_st = [f"{c} - {mapa_nomes.get(c, 'Distribuidor ' + c)}" for c in cnpjs_st]
+        st_dists_sel = st.multiselect("Filtrar Distribuidores na Base de Estoque:", options=opcoes_dist_st, key="st_base_dist")
+        
+        df_stock_view = df_stock.copy()
+        if st_dists_sel:
+            cnpjs_st_filt = [d.split(" - ")[0] for d in st_dists_sel]
+            df_stock_view = df_stock_view[df_stock_view['cnpj_clean'].isin(cnpjs_st_filt)]
+            
         cols_st = ['cnpj_clean', 'ean', 'quantidade', 'dt_estoque']
-        df_stock_analise = df_stock.copy()
-        df_stock_analise['Duplicado_no_Dia'] = df_stock_analise.duplicated(subset=cols_st, keep=False)
-        df_stock_analise['Status_Linha'] = df_stock_analise['Duplicado_no_Dia'].apply(lambda x: "⚠️ Repetido no Dia" if x else "✅ Ok")
-        st.dataframe(df_stock_analise[['arquivo_origem', 'data', 'cnpj_clean', 'nome_loja', 'ean', 'nome_produto', 'quantidade', 'Status_Linha']].sort_values(by=['data', 'cnpj_clean'], ascending=[False, True]), use_container_width=True)
+        df_stock_view['Duplicado_no_Dia'] = df_stock_view.duplicated(subset=cols_st, keep=False)
+        df_stock_view['Status_Linha'] = df_stock_view['Duplicado_no_Dia'].apply(lambda x: "⚠️ Repetido no Dia" if x else "✅ Ok")
+        
+        st.dataframe(df_stock_view[['arquivo_origem', 'data', 'cnpj_clean', 'nome_loja', 'ean', 'nome_produto', 'quantidade', 'Status_Linha']].sort_values(by=['data', 'cnpj_clean'], ascending=[False, True]), use_container_width=True)

@@ -14,7 +14,7 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# Estilização do Portal Gofind
+# --- ESTILIZAÇÃO E COMPONENTES VISUAIS (TEMA ESCURO + SEMÁFORO INTERATIVO) ---
 st.markdown("""
 <style>
     @import url('https://fonts.googleapis.com/css2?family=Kumbh+Sans:wght@400;600;700&family=Raleway:wght@400;500;600&display=swap');
@@ -78,6 +78,23 @@ st.markdown("""
         color: #FFFFFF !important;
         font-size: 28px !important;
     }
+
+    /* Estilização dos Botões do Semáforo LED */
+    div[data-testid="stHorizontalBlock"] .stButton > button {
+        border-radius: 50% !important;
+        width: 48px !important;
+        height: 48px !important;
+        padding: 0px !important;
+        font-size: 22px !important;
+        border: 2px solid rgba(255,255,255,0.2) !important;
+        background-color: #1A222A !important;
+        box-shadow: inset 0 2px 4px rgba(0,0,0,0.6);
+        transition: all 0.3s ease;
+    }
+    div[data-testid="stHorizontalBlock"] .stButton > button:hover {
+        transform: scale(1.15);
+        border-color: #FFFFFF !important;
+    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -96,7 +113,7 @@ def formatar_real(valor):
 def carregar_e_compilar_tudo(key, secret, bucket, prefix):
     s3 = boto3.client('s3', aws_access_key_id=key, aws_secret_access_key=secret, region_name='us-east-1')
     
-    # 1. SELLOUT OTIMIZADO (Carrega apenas colunas necessárias)
+    # 1. SELLOUT
     cols_so_desejadas = ['nfeId', 'nNF', 'distribuidor', 'nome_distribuidor', 'loja', 'gtin', 'data', 'data_processamento', 'quantidade_produtos', 'preco_venda_total', 'status']
     res_so = s3.list_objects_v2(Bucket=bucket, Prefix=f"{prefix}reports/")
     arq_so = [obj['Key'] for obj in res_so.get('Contents', []) if obj['Key'].endswith('.csv')]
@@ -105,7 +122,6 @@ def carregar_e_compilar_tudo(key, secret, bucket, prefix):
     for k in arq_so:
         try:
             obj = s3.get_object(Bucket=bucket, Key=k)
-            # Leitura eficiente de memória
             df_t = pd.read_csv(io.BytesIO(obj['Body'].read()), encoding='utf-8', usecols=lambda c: c in cols_so_desejadas)
             df_t['arquivo_origem'] = k.split('/')[-1]
             dfs_so.append(df_t)
@@ -116,7 +132,7 @@ def carregar_e_compilar_tudo(key, secret, bucket, prefix):
     del dfs_so
     gc.collect()
 
-    # 2. ESTOQUE OTIMIZADO
+    # 2. ESTOQUE
     cols_st_desejadas = ['data', 'cnpj_loja', 'nome_loja', 'ean', 'nome_produto', 'quantidade']
     res_st = s3.list_objects_v2(Bucket=bucket, Prefix=f"{prefix}stock-reports/")
     arq_st = [obj['Key'] for obj in res_st.get('Contents', []) if obj['Key'].endswith('.csv')]
@@ -151,7 +167,7 @@ def carregar_e_compilar_tudo(key, secret, bucket, prefix):
 
     return df_sellout, df_stock
 
-with st.spinner("Compilando base de dados com baixa alocação de memória..."):
+with st.spinner("Compilando base de dados da Gofind..."):
     df_sellout, df_stock = carregar_e_compilar_tudo(AWS_KEY, AWS_SECRET, BUCKET, PREFIX)
 
 cnpjs_so = [str(x) for x in df_sellout['distribuidor_clean'].dropna().unique() if str(x).strip() != ''] if not df_sellout.empty else []
@@ -164,7 +180,7 @@ if not df_sellout.empty:
 if not df_stock.empty:
     mapa_nomes.update(df_stock.set_index('cnpj_clean')['nome_loja'].dropna().to_dict())
 
-# Média Histórica
+# Média Histórica para o Alerta Amarelo
 medias_diarias_dist = {}
 if not df_sellout.empty:
     daily_dist = df_sellout.groupby(['distribuidor_clean', 'dt_venda'])['quantidade_produtos'].sum().reset_index()
@@ -258,6 +274,14 @@ if aba_selecionada == "📅 Calendário - Sellout":
 
     df_cross_so['Media_Historica_Diaria'] = df_cross_so['distribuidor_clean'].map(lambda x: round(medias_diarias_dist.get(x, 0), 1))
     df_cross_so['Status'] = df_cross_so.apply(def_status_so, axis=1)
+    
+    # Mapeamento do Sinal Visual para a Tabela
+    mapa_sinais = {
+        "🔴 Vermelho (Não Enviou)": "🔴",
+        "🟡 Amarelo (Abaixo da Média)": "🟡",
+        "🟢 Verde (OK)": "🟢"
+    }
+    df_cross_so['Sinal'] = df_cross_so['Status'].map(mapa_sinais)
     df_cross_so['Nome_Distribuidor'] = df_cross_so['distribuidor_clean'].map(lambda x: mapa_nomes.get(x, f"CNPJ {x}"))
 
     res_diario_so = df_cross_so.groupby('dt_venda').agg(
@@ -271,16 +295,43 @@ if aba_selecionada == "📅 Calendário - Sellout":
     st.dataframe(res_diario_so.assign(Faturamento_Dia=res_diario_so['Faturamento_Dia'].apply(formatar_real)), use_container_width=True)
     
     st.divider()
-    col_d_sel, col_s_sel = st.columns(2)
+    
+    # --- COMPONENTE DO SEMÁFORO INTERATIVO ---
+    col_d_sel, col_semaforo, col_legenda = st.columns([2.5, 2.5, 5])
+    
     dia_escolhido_so = col_d_sel.selectbox("Escolha o Dia para Inspecionar:", options=datas_periodo_so, key="dia_so")
-    status_escolhido_so = col_s_sel.radio("Filtrar por Sinal:", ["🔴 Vermelho (Não Enviou)", "🟡 Amarelo (Abaixo da Média)", "🟢 Verde (OK)"], key="stat_so", horizontal=True)
+    
+    # Estado inicial do botão de sinal
+    if 'sinal_ativo_so' not in st.session_state:
+        st.session_state['sinal_ativo_so'] = "🔴 Vermelho (Não Enviou)"
+        
+    with col_semaforo:
+        st.markdown("<p style='font-size:13px; font-weight:600; color:#FFFFFF; margin-bottom:5px;'>Filtrar por Sinal:</p>", unsafe_allow_html=True)
+        c_red, c_yel, c_gre = st.columns(3)
+        if c_red.button("🔴", key="btn_red"):
+            st.session_state['sinal_ativo_so'] = "🔴 Vermelho (Não Enviou)"
+        if c_yel.button("🟡", key="btn_yel"):
+            st.session_state['sinal_ativo_so'] = "🟡 Amarelo (Abaixo da Média)"
+        if c_gre.button("🟢", key="btn_gre"):
+            st.session_state['sinal_ativo_so'] = "🟢 Verde (OK)"
 
+    with col_legenda:
+        st.markdown("""
+        <div style='background-color:#0E3940; padding:8px 12px; border-radius:8px; border:1px solid rgba(255,255,255,0.1); font-size:12px; margin-top:18px;'>
+            <span style='margin-right:15px;'>🔴 <b>Vermelho:</b> Não enviou</span>
+            <span style='margin-right:15px;'>🟡 <b>Amarelo:</b> Abaixo da média</span>
+            <span>🟢 <b>Verde:</b> OK</span>
+        </div>
+        """, unsafe_allow_html=True)
+
+    status_escolhido_so = st.session_state['sinal_ativo_so']
     detalhe_so = df_cross_so[(df_cross_so['dt_venda'] == dia_escolhido_so) & (df_cross_so['Status'] == status_escolhido_so)]
-    st.write(f"**Distribuidores ({len(detalhe_so)}) no dia `{dia_escolhido_so}` com status `{status_escolhido_so}`:**")
+    
+    st.markdown(f"##### Distribuidores ({len(detalhe_so)}) no dia `{dia_escolhido_so}` com status `{status_escolhido_so}`:")
     
     exib_so = detalhe_so.copy()
     exib_so['Faturamento'] = exib_so['Faturamento'].apply(formatar_real)
-    st.dataframe(exib_so[['distribuidor_clean', 'Nome_Distribuidor', 'Qtd_Notas', 'Itens_Vendidos', 'Media_Historica_Diaria', 'Faturamento']], use_container_width=True)
+    st.dataframe(exib_so[['Sinal', 'distribuidor_clean', 'Nome_Distribuidor', 'Qtd_Notas', 'Itens_Vendidos', 'Media_Historica_Diaria', 'Faturamento']], use_container_width=True)
 
 # ----------------------------------------------------
 # VISÃO 2: CALENDÁRIO ESTOQUE
@@ -307,6 +358,7 @@ elif aba_selecionada == "📦 Calendário - Estoque":
         df_cross_st['Produtos_Distintos'] = 0
 
     df_cross_st['Status'] = df_cross_st['Registros'].apply(lambda x: "🟢 Verde (Estoque Recebido)" if x > 0 else "🔴 Vermelho (Estoque Ausente)")
+    df_cross_st['Sinal'] = df_cross_st['Registros'].apply(lambda x: "🟢" if x > 0 else "🔴")
     df_cross_st['Nome_Distribuidor'] = df_cross_st['cnpj_clean'].map(lambda x: mapa_nomes.get(x, f"CNPJ {x}"))
 
     res_diario_st = df_cross_st.groupby('dt_estoque').agg(
@@ -318,12 +370,25 @@ elif aba_selecionada == "📦 Calendário - Estoque":
     st.dataframe(res_diario_st, use_container_width=True)
     
     st.divider()
-    col_d_st, col_s_st = st.columns(2)
+    col_d_st, col_sem_st = st.columns([3, 7])
     dia_escolhido_st = col_d_st.selectbox("Escolha o Dia de Estoque:", options=datas_periodo_st, key="dia_st")
-    status_escolhido_st = col_s_st.radio("Filtrar por Sinal:", ["🔴 Vermelho (Estoque Ausente)", "🟢 Verde (Estoque Recebido)"], key="stat_st", horizontal=True)
+    
+    if 'sinal_ativo_st' not in st.session_state:
+        st.session_state['sinal_ativo_st'] = "🔴 Vermelho (Estoque Ausente)"
+        
+    with col_sem_st:
+        st.markdown("<p style='font-size:13px; font-weight:600; color:#FFFFFF; margin-bottom:5px;'>Filtrar por Sinal:</p>", unsafe_allow_html=True)
+        cs_red, cs_gre = st.columns([1, 1])
+        if cs_red.button("🔴", key="btn_red_st"):
+            st.session_state['sinal_ativo_st'] = "🔴 Vermelho (Estoque Ausente)"
+        if cs_gre.button("🟢", key="btn_gre_st"):
+            st.session_state['sinal_ativo_st'] = "🟢 Verde (Estoque Recebido)"
 
+    status_escolhido_st = st.session_state['sinal_ativo_st']
     detalhe_st = df_cross_st[(df_cross_st['dt_estoque'] == dia_escolhido_st) & (df_cross_st['Status'] == status_escolhido_st)]
-    st.dataframe(detalhe_st[['cnpj_clean', 'Nome_Distribuidor', 'Registros', 'Produtos_Distintos', 'Saldo_Itens']], use_container_width=True)
+    
+    st.markdown(f"##### Distribuidores ({len(detalhe_st)}) no dia `{dia_escolhido_st}` com status `{status_escolhido_st}`:")
+    st.dataframe(detalhe_st[['Sinal', 'cnpj_clean', 'Nome_Distribuidor', 'Registros', 'Produtos_Distintos', 'Saldo_Itens']], use_container_width=True)
 
 # ----------------------------------------------------
 # VISÃO 3: AUDITORIA SELLOUT

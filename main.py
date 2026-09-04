@@ -3,6 +3,7 @@ import pandas as pd
 import boto3
 import io
 import calendar
+import gc
 from datetime import datetime, date
 
 # Configuração da Página
@@ -13,7 +14,7 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# --- ESTILIZAÇÃO COMPATÍVEL COM O PORTAL GOFIND (TEMA ESCURO) ---
+# Estilização do Portal Gofind
 st.markdown("""
 <style>
     @import url('https://fonts.googleapis.com/css2?family=Kumbh+Sans:wght@400;600;700&family=Raleway:wght@400;500;600&display=swap');
@@ -22,7 +23,6 @@ st.markdown("""
         font-family: 'Raleway', sans-serif;
     }
     
-    /* Sidebar Estilo Portal (#0E3940) */
     [data-testid="stSidebar"] {
         background-color: #0E3940 !important;
     }
@@ -30,14 +30,12 @@ st.markdown("""
         color: #FFFFFF !important;
     }
     
-    /* Títulos em Verde Gofind (#93C400) para Alto Contraste */
     h1, h2, h3, h4, .stMarkdown h1, .stMarkdown h2, .stMarkdown h3 {
         font-family: 'Kumbh Sans', sans-serif !important;
         color: #93C400 !important;
         font-weight: 700 !important;
     }
 
-    /* Estilo dos Botões de Menu na Sidebar */
     div.stRadio > div {
         background-color: transparent;
         gap: 8px;
@@ -51,7 +49,7 @@ st.markdown("""
         width: 100%;
         transition: all 0.2s;
     }
-    div.stRadio > div > label:hover {
+    div.stRadio > div:hover > label {
         background-color: rgba(147, 196, 0, 0.2);
         border-color: #93C400;
     }
@@ -64,7 +62,6 @@ st.markdown("""
         font-weight: 600;
     }
     
-    /* Correção de Métricas (Sem caixas brancas) */
     [data-testid="stMetric"] {
         background-color: #0E3940 !important;
         padding: 15px;
@@ -95,55 +92,66 @@ def formatar_real(valor):
         return "R$ 0,00"
     return f"R$ {valor:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
 
-@st.cache_data(ttl=300)
+@st.cache_data(ttl=600)
 def carregar_e_compilar_tudo(key, secret, bucket, prefix):
     s3 = boto3.client('s3', aws_access_key_id=key, aws_secret_access_key=secret, region_name='us-east-1')
     
-    # 1. SELLOUT
+    # 1. SELLOUT OTIMIZADO (Carrega apenas colunas necessárias)
+    cols_so_desejadas = ['nfeId', 'nNF', 'distribuidor', 'nome_distribuidor', 'loja', 'gtin', 'data', 'data_processamento', 'quantidade_produtos', 'preco_venda_total', 'status']
     res_so = s3.list_objects_v2(Bucket=bucket, Prefix=f"{prefix}reports/")
     arq_so = [obj['Key'] for obj in res_so.get('Contents', []) if obj['Key'].endswith('.csv')]
+    
     dfs_so = []
     for k in arq_so:
         try:
             obj = s3.get_object(Bucket=bucket, Key=k)
-            df_t = pd.read_csv(io.BytesIO(obj['Body'].read()), encoding='utf-8', dtype=str)
+            # Leitura eficiente de memória
+            df_t = pd.read_csv(io.BytesIO(obj['Body'].read()), encoding='utf-8', usecols=lambda c: c in cols_so_desejadas)
             df_t['arquivo_origem'] = k.split('/')[-1]
             dfs_so.append(df_t)
         except Exception:
             pass
+    
     df_sellout = pd.concat(dfs_so, ignore_index=True) if dfs_so else pd.DataFrame()
+    del dfs_so
+    gc.collect()
 
-    # 2. ESTOQUE
+    # 2. ESTOQUE OTIMIZADO
+    cols_st_desejadas = ['data', 'cnpj_loja', 'nome_loja', 'ean', 'nome_produto', 'quantidade']
     res_st = s3.list_objects_v2(Bucket=bucket, Prefix=f"{prefix}stock-reports/")
     arq_st = [obj['Key'] for obj in res_st.get('Contents', []) if obj['Key'].endswith('.csv')]
+    
     dfs_st = []
     for k in arq_st:
         try:
             obj = s3.get_object(Bucket=bucket, Key=k)
-            df_t = pd.read_csv(io.BytesIO(obj['Body'].read()), encoding='utf-8', dtype=str)
+            df_t = pd.read_csv(io.BytesIO(obj['Body'].read()), encoding='utf-8', usecols=lambda c: c in cols_st_desejadas)
             df_t['arquivo_origem'] = k.split('/')[-1]
             dfs_st.append(df_t)
         except Exception:
             pass
+            
     df_stock = pd.concat(dfs_st, ignore_index=True) if dfs_st else pd.DataFrame()
+    del dfs_st
+    gc.collect()
 
-    # Tratamento Sellout
+    # Trata Tipos de Dados em Sellout
     if not df_sellout.empty:
-        df_sellout['quantidade_produtos'] = pd.to_numeric(df_sellout['quantidade_produtos'], errors='coerce').fillna(0)
-        df_sellout['preco_venda_total'] = pd.to_numeric(df_sellout['preco_venda_total'], errors='coerce').fillna(0)
+        df_sellout['quantidade_produtos'] = pd.to_numeric(df_sellout['quantidade_produtos'], errors='coerce').fillna(0).astype('float32')
+        df_sellout['preco_venda_total'] = pd.to_numeric(df_sellout['preco_venda_total'], errors='coerce').fillna(0).astype('float32')
         df_sellout['dt_venda'] = pd.to_datetime(df_sellout['data'], errors='coerce').dt.strftime('%Y-%m-%d')
         df_sellout['dt_proc'] = pd.to_datetime(df_sellout['data_processamento'], errors='coerce').dt.strftime('%Y-%m-%d')
         df_sellout['distribuidor_clean'] = df_sellout['distribuidor'].astype(str).str.replace(r'\D', '', regex=True).str.zfill(14)
 
-    # Tratamento Estoque
+    # Trata Tipos de Dados em Estoque
     if not df_stock.empty:
-        df_stock['quantidade'] = pd.to_numeric(df_stock['quantidade'], errors='coerce').fillna(0)
+        df_stock['quantidade'] = pd.to_numeric(df_stock['quantidade'], errors='coerce').fillna(0).astype('float32')
         df_stock['dt_estoque'] = pd.to_datetime(df_stock['data'], errors='coerce').dt.strftime('%Y-%m-%d')
         df_stock['cnpj_clean'] = df_stock['cnpj_loja'].astype(str).str.replace(r'\D', '', regex=True).str.zfill(14)
 
     return df_sellout, df_stock
 
-with st.spinner("Carregando base de dados da Gofind..."):
+with st.spinner("Compilando base de dados com baixa alocação de memória..."):
     df_sellout, df_stock = carregar_e_compilar_tudo(AWS_KEY, AWS_SECRET, BUCKET, PREFIX)
 
 cnpjs_so = [str(x) for x in df_sellout['distribuidor_clean'].dropna().unique() if str(x).strip() != ''] if not df_sellout.empty else []
@@ -156,15 +164,14 @@ if not df_sellout.empty:
 if not df_stock.empty:
     mapa_nomes.update(df_stock.set_index('cnpj_clean')['nome_loja'].dropna().to_dict())
 
-# Média Histórica para o Alerta Amarelo
+# Média Histórica
 medias_diarias_dist = {}
 if not df_sellout.empty:
     daily_dist = df_sellout.groupby(['distribuidor_clean', 'dt_venda'])['quantidade_produtos'].sum().reset_index()
     medias_diarias_dist = daily_dist.groupby('distribuidor_clean')['quantidade_produtos'].mean().to_dict()
 
-# --- SIDEBAR: MENU LATERAL GOFIND ---
+# --- SIDEBAR ---
 with st.sidebar:
-    # Tenta carregar o logo local ou via GitHub
     try:
         st.image("logo.png", width=160)
     except Exception:
@@ -202,7 +209,6 @@ def render_controles_data_e_distribuidores(key_prefix):
         
     datas_periodo = pd.date_range(dt_inicio, dt_fim).strftime('%Y-%m-%d').tolist()
     
-    # Filtro de Grupo de Distribuidores
     opcoes_dist = [f"{c} - {mapa_nomes.get(c, 'Distribuidor ' + c)}" for c in cnpjs_todos]
     dist_selecionados = st.multiselect(
         "Filtrar Distribuidores Específicos (Deixe em branco para analisar TODOS):",
@@ -332,7 +338,7 @@ elif aba_selecionada == "🚨 Auditoria Sellout":
         st.dataframe(dup_so, use_container_width=True)
 
 # ----------------------------------------------------
-# VISÃO 4: TABELA COMPLETA DE ESTOQUE + FILTRO POR DISTRIBUIDOR
+# VISÃO 4: TABELA COMPLETA DE ESTOQUE
 # ----------------------------------------------------
 elif aba_selecionada == "📊 Base de Estoque":
     st.title("📊 Base de Dados Completa de Estoque Diário")
